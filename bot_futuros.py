@@ -28,12 +28,14 @@ from __future__ import annotations
 
 import argparse
 import os
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 import pandas as pd
 import time
+from decimal import Decimal, ROUND_DOWN
 
 try:
     # Para ejecución en vivo (futuros USDT-M). No se usa en el backtest.
@@ -47,16 +49,22 @@ except Exception:
 # -----------------------------
 @dataclass
 class StrategyConfig:
-    rsi_length: int = 14
-    ema_length: int = 200
+    # Parámetros de la estrategia
+    interval_minutes: int = 5
 
-    stop_loss_pct: float = 0.015   # 1.5%
-    take_profit_pct: float = 0.045 # 4.5%
-    trailing_stop_pct: float = 0.01  # 1.0%
+    # Indicadores
+    rsi_length: int = 7
+    bb_length: int = 20
+    bb_std_mult: float = 2.0
 
-    # Si en la misma vela se tocan SL y TP:
-    # - False: asume primero el Stop Loss (caso conservador).
-    tp_first: bool = False
+    rsi_entry_level: float = 25.0
+    rsi_exit_level: float = 75.0
+
+    # Riesgo / ejecución
+    leverage: int = 5
+    margin_fraction: float = 0.20  # 20% del margen disponible
+
+    stop_loss_pct: float = 0.015  # 1.5% desde el precio de entrada
 
 
 # -----------------------------
@@ -154,18 +162,19 @@ def _download_with_yfinance(
 # -----------------------------
 def prepare_indicators(df: pd.DataFrame, cfg: StrategyConfig) -> pd.DataFrame:
     """
-    Calcula RSI(14) y MACD(12,26,9) de forma nativa con pandas y genera columnas para las señales.
+    Calcula RSI corto (7) y Bandas de Bollinger (20, 2σ) con pandas y genera señales:
+    - long_signal: cruza por debajo de BB inferior y RSI <= 25
+    - exit_signal: toca/supera BB superior o RSI > 75
     """
     out = df.copy()
 
     # -----------------------------
-    # RSI (Wilder) con pandas
+    # RSI (Wilder) nativo con pandas
     # -----------------------------
     delta = out["close"].diff()
     gain = delta.clip(lower=0.0)
     loss = (-delta).clip(lower=0.0)
 
-    # Wilder: promedio suavizado con alpha=1/length
     avg_gain = gain.ewm(alpha=1.0 / cfg.rsi_length, adjust=False).mean()
     avg_loss = loss.ewm(alpha=1.0 / cfg.rsi_length, adjust=False).mean()
 
@@ -173,26 +182,32 @@ def prepare_indicators(df: pd.DataFrame, cfg: StrategyConfig) -> pd.DataFrame:
     out["rsi"] = 100.0 - (100.0 / (1.0 + rs))
 
     # -----------------------------
-    # MACD estándar (12, 26, 9)
+    # Bollinger Bands (20, 2σ)
     # -----------------------------
-    ema_fast = out["close"].ewm(span=12, adjust=False).mean()
-    ema_slow = out["close"].ewm(span=26, adjust=False).mean()
-    out["macd"] = ema_fast - ema_slow
-    out["macd_signal"] = out["macd"].ewm(span=9, adjust=False).mean()
+    out["bb_middle"] = out["close"].rolling(cfg.bb_length).mean()
+    out["bb_std"] = out["close"].rolling(cfg.bb_length).std(ddof=0)
+    out["bb_upper"] = out["bb_middle"] + cfg.bb_std_mult * out["bb_std"]
+    out["bb_lower"] = out["bb_middle"] - cfg.bb_std_mult * out["bb_std"]
 
-    out = out.dropna(subset=["rsi", "macd", "macd_signal"]).reset_index(drop=True)
+    out = out.dropna(subset=["rsi", "bb_upper", "bb_lower"]).reset_index(drop=True)
 
-    # Señal de compra (Long)
-    # Cruce alcista: MACD pasa de <= Señal a > Señal
-    out["macd_cross_up"] = (out["macd"] > out["macd_signal"]) & (out["macd"].shift(1) <= out["macd_signal"].shift(1))
-    # Ventana flexible:
-    # El RSI pudo estar por debajo de RSI_ENTRY_LEVEL en cualquiera de las últimas N velas.
-    RSI_WINDOW = 5
-    RSI_ENTRY_LEVEL = 42
-    out["rsi_below_recent"] = (out["rsi"] < RSI_ENTRY_LEVEL).rolling(window=RSI_WINDOW, min_periods=1).max().astype(bool)
-    out["long_signal"] = out["rsi_below_recent"] & out["macd_cross_up"]
-    # Señal de salida por RSI
-    out["exit_signal"] = out["rsi"] > 70
+    # -----------------------------
+    # Reglas del bot
+    # -----------------------------
+    # Cruce por debajo de la BB inferior:
+    # - en la vela anterior el close estaba >= bb_lower
+    # - en la vela actual el close está < bb_lower
+    prev_close = out["close"].shift(1)
+    prev_lower = out["bb_lower"].shift(1)
+    out["bb_cross_below_lower"] = (prev_close >= prev_lower) & (out["close"] < out["bb_lower"])
+
+    # Compra (LONG)
+    out["long_signal"] = out["bb_cross_below_lower"] & (out["rsi"] <= cfg.rsi_entry_level)
+
+    # Venta / Cierre de LONG:
+    # - toca o supera BB superior (usamos high para ser más realista en velas)
+    # - o RSI > 75
+    out["exit_signal"] = (out["high"] >= out["bb_upper"]) | (out["rsi"] > cfg.rsi_exit_level)
 
     return out
 
@@ -515,82 +530,256 @@ def execute_futures_market_buy(
     )
 
 
+def _round_down_to_step(quantity: float, step_size: float) -> float:
+    """
+    Redondea hacia abajo según el stepSize para evitar errores de LOT_SIZE.
+    """
+    step = Decimal(str(step_size))
+    qty = Decimal(str(quantity))
+    rounded = (qty // step) * step
+    return float(rounded)
+
+
+def _round_down_to_tick(price: float, tick_size: float) -> float:
+    """
+    Redondea hacia abajo según el tickSize para evitar errores de PRICE_FILTER.
+    """
+    tick = Decimal(str(tick_size))
+    p = Decimal(str(price))
+    rounded = (p // tick) * tick
+    return float(rounded)
+
+
+def _get_futures_symbol_filters(client: "Client", symbol: str) -> tuple[float, float]:
+    """
+    Devuelve (step_size, tick_size) para el símbolo en Binance Futuros USDT-M.
+    """
+    info = client.futures_exchange_info()
+    sym = next((s for s in info["symbols"] if s["symbol"] == symbol), None)
+    if sym is None:
+        raise RuntimeError(f"No encontré el símbolo {symbol} en futures_exchange_info().")
+
+    step_size: Optional[float] = None
+    tick_size: Optional[float] = None
+
+    for f in sym.get("filters", []):
+        if f.get("filterType") == "LOT_SIZE":
+            step_size = float(f["stepSize"])
+        if f.get("filterType") == "PRICE_FILTER":
+            tick_size = float(f["tickSize"])
+
+    if step_size is None or tick_size is None:
+        raise RuntimeError(f"No pude obtener step/tick para {symbol}.")
+
+    return step_size, tick_size
+
+
+def _get_available_margin_usdt(client: "Client") -> float:
+    """
+    Lee el margen disponible en USDT desde futures_account().
+    """
+    account = client.futures_account()
+    # En binance, suele existir "availableBalance"
+    for key in ("availableBalance", "available_balance"):
+        if key in account and account[key] is not None:
+            return float(account[key])
+    # fallback
+    return float(account.get("totalWalletBalance", 0.0))
+
+
+def _get_open_position_amt(client: "Client", symbol: str) -> float:
+    """
+    Devuelve positionAmt (positivo = LONG).
+    """
+    pos = client.futures_position_information(symbol=symbol)
+    if not pos:
+        return 0.0
+    return float(pos[0]["positionAmt"])
+
+
+def _cancel_all_open_orders(client: "Client", symbol: str) -> None:
+    try:
+        client.futures_cancel_all_open_orders(symbol=symbol)
+    except Exception:
+        # Si el endpoint difiere o falla, lo ignoramos (los create-order del stop pueden fallar más tarde).
+        pass
+
+
+def _place_long_with_stop(
+    client: "Client",
+    symbol: str,
+    cfg: StrategyConfig,
+    step_size: float,
+    tick_size: float,
+    entry_price: float,
+) -> None:
+    """
+    Abre una posición LONG MARKET y crea un STOP_MARKET de protección 1.5%.
+    """
+    available_usdt = _get_available_margin_usdt(client)
+    if available_usdt <= 0:
+        raise RuntimeError("availableBalance <= 0, no se puede dimensionar la orden.")
+
+    # Queremos usar exactamente el 20% del margen disponible.
+    margin_to_use = available_usdt * cfg.margin_fraction
+    notional = margin_to_use * cfg.leverage
+    raw_qty = notional / entry_price
+    quantity = _round_down_to_step(raw_qty, step_size)
+    if quantity <= 0:
+        raise RuntimeError("Cantidad redondeada a 0; revisa stepSize / precio / margen.")
+
+    client.futures_create_order(
+        symbol=symbol,
+        side="BUY",
+        type="MARKET",
+        quantity=quantity,
+    )
+
+    stop_price = _round_down_to_tick(entry_price * (1.0 - cfg.stop_loss_pct), tick_size)
+    client.futures_create_order(
+        symbol=symbol,
+        side="SELL",
+        type="STOP_MARKET",
+        quantity=quantity,
+        stopPrice=stop_price,
+        reduceOnly=True,
+    )
+
+
+def _close_long_market(
+    client: "Client",
+    symbol: str,
+    step_size: float,
+) -> None:
+    """
+    Cierra LONG con una orden MARKET SELL (reduceOnly) usando el positionAmt actual.
+    """
+    position_amt = _get_open_position_amt(client, symbol)
+    if position_amt <= 0:
+        return
+
+    quantity = _round_down_to_step(position_amt, step_size)
+    if quantity <= 0:
+        return
+
+    _cancel_all_open_orders(client, symbol)
+
+    client.futures_create_order(
+        symbol=symbol,
+        side="SELL",
+        type="MARKET",
+        quantity=quantity,
+        reduceOnly=True,
+    )
+
+
 # -----------------------------
 # Punto de entrada (main)
 # -----------------------------
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Bot de futuros educativos para BTC usando RSI+EMA.")
-    parser.add_argument("--lookback-days", type=int, default=30, help="Cuántos días hacia atrás descargar.")
-    parser.add_argument("--interval", type=str, default="15m", help="Intervalo (ej: 15m, 1h, 4h, 1d).")
-    parser.add_argument("--tp-first", action="store_true", help="Si en la misma vela se toca SL y TP, prioriza TP.")
-    parser.add_argument("--live", action="store_true", help="Ejecuta el bot en modo live (requiere ccxt).")
-    parser.add_argument("--exchange", type=str, default="binance", help="Exchange para live (ej: binance, bingx).")
-    parser.add_argument("--symbol", type=str, default="BTC/USDT", help="Símbolo para live (ej: BTC/USDT).")
+    parser = argparse.ArgumentParser(description="Bot futuros BTC (5m) con RSI(7) + Bollinger y órdenes reales en Binance.")
+    parser.add_argument("--lookback-days", type=int, default=2, help="Días hacia atrás para descargar datos con yfinance.")
+    parser.add_argument("--interval", type=str, default="5m", help="Intervalo (por defecto: 5m).")
+    parser.add_argument("--symbol", type=str, default="BTCUSDT", help="Símbolo Binance USDT-M (ej: BTCUSDT).")
     args = parser.parse_args()
 
-    cfg = StrategyConfig(tp_first=args.tp_first)
+    cfg = StrategyConfig()
 
-    if args.live:
-        run_live(symbol=args.symbol, exchange_id=args.exchange, timeframe=args.interval, cfg=cfg)
-    else:
+    binance_client = get_binance_futures_client()
+    step_size: Optional[float] = None
+    tick_size: Optional[float] = None
+
+    if binance_client is None:
         print(
-            f"[INFO] Descargando datos BTC (lookback={args.lookback_days} días, interval={args.interval})...",
+            "[LIVE] Sin credenciales BINANCE_API_KEY/BINANCE_API_SECRET o python-binance no instalado; se ejecutará en modo señal (sin órdenes).",
             flush=True,
         )
-        df = download_btc_ohlcv(lookback_days=args.lookback_days, interval=args.interval)
+    else:
+        # 1) Configurar apalancamiento 5x al inicio
+        try:
+            binance_client.futures_change_leverage(symbol=args.symbol, leverage=cfg.leverage)
+            print(f"[LIVE] Leverage configurado: {cfg.leverage}x para {args.symbol}.", flush=True)
+        except Exception as e:
+            print(f"[LIVE] No pude configurar leverage ({e}). Continuo.", flush=True)
 
-        # Convertimos a float por seguridad
-        for c in ["open", "high", "low", "close"]:
-            df[c] = df[c].astype(float)
+        # 2) Obtener filtros para rounding correcto
+        step_size, tick_size = _get_futures_symbol_filters(binance_client, args.symbol)
+        print(
+            f"[LIVE] Filtros Binance: step_size={step_size} | tick_size={tick_size}",
+            flush=True,
+        )
 
-        df = df.sort_values("date").reset_index(drop=True)
+    last_processed_ts: Optional[pd.Timestamp] = None
+    print("[LIVE] Estrategia activa. Revisando mercado continuamente...", flush=True)
 
-        print("[INFO] Calculando indicadores (RSI/EMA)...", flush=True)
-        df_ind = prepare_indicators(df, cfg)
+    while True:
+        try:
+            print("[LIVE] Revisando mercado real...", flush=True)
 
-        print("[INFO] Ejecutando backtest simple...", flush=True)
-        trades_df = run_backtest(df_ind, cfg)
+            df_live = download_btc_ohlcv(lookback_days=args.lookback_days, interval=args.interval)
+            for c in ["open", "high", "low", "close"]:
+                df_live[c] = df_live[c].astype(float)
+            df_live = df_live.sort_values("date").reset_index(drop=True)
 
-        print_summary(trades_df)
-
-        last_processed_ts: Optional[pd.Timestamp] = None
-        while True:
-            try:
-                print("[LIVE] Esperando señal en el mercado real...", flush=True)
-
-                # Mantener el proceso activo en Render
+            df_ind_live = prepare_indicators(df_live, cfg)
+            if df_ind_live.empty:
                 time.sleep(60)
+                continue
 
-                df_live = download_btc_ohlcv(lookback_days=5, interval=args.interval)
-                for c in ["open", "high", "low", "close"]:
-                    df_live[c] = df_live[c].astype(float)
+            last = df_ind_live.iloc[-1]
+            current_ts = last["date"]
+            if last_processed_ts is not None and current_ts == last_processed_ts:
+                time.sleep(60)
+                continue
 
-                df_live = df_live.sort_values("date").reset_index(drop=True)
-                df_ind_live = prepare_indicators(df_live, cfg)
+            last_processed_ts = current_ts
 
-                if df_ind_live.empty:
-                    continue
+            long_signal = bool(last["long_signal"])
+            exit_signal = bool(last["exit_signal"])
+            last_close = float(last["close"])
 
-                current_ts = df_ind_live.iloc[-1]["date"]
-                should_react = current_ts != last_processed_ts
-                if should_react and bool(df_ind_live.iloc[-1]["long_signal"]):
-                    print("[LIVE] Señal LONG detectada (long_signal=True).", flush=True)
+            if binance_client is None:
+                if long_signal:
+                    print("[LIVE] Señal LONG detectada (modo señal, sin órdenes).", flush=True)
+                continue
 
-                    binance_client = get_binance_futures_client()
-                    if binance_client is not None:
-                        # Ejemplo: compra market futures cuando long_signal es True.
-                        execute_futures_market_buy(binance_client, symbol="BTCUSDT", quantity=0.001)
-                        print("[LIVE] Orden futures MARKET BUY enviada (ejemplo).", flush=True)
-                    else:
-                        print(
-                            "[LIVE] No se enviará orden: faltan credenciales BINANCE_API_KEY/BINANCE_API_SECRET o python-binance no instalado.",
-                            flush=True,
-                        )
+            assert step_size is not None and tick_size is not None
 
-                    last_processed_ts = current_ts
-            except Exception as e:
-                # No detenemos el bucle si ocurre un problema puntual de red/datos
-                print(f"[LIVE] Error revisando señales: {e}", flush=True)
+            position_amt = _get_open_position_amt(binance_client, symbol=args.symbol)
+            in_long = position_amt > 0
+
+            if not in_long:
+                if long_signal:
+                    print(
+                        f"[LIVE] Ejecutando LONG: close={last_close:.2f} (RSI <= {cfg.rsi_entry_level}, BB cross).",
+                        flush=True,
+                    )
+                    _place_long_with_stop(
+                        client=binance_client,
+                        symbol=args.symbol,
+                        cfg=cfg,
+                        step_size=step_size,
+                        tick_size=tick_size,
+                        entry_price=last_close,
+                    )
+            else:
+                if exit_signal:
+                    print(
+                        f"[LIVE] Ejecutando CLOSE LONG: close={last_close:.2f} (BB tocada o RSI> {cfg.rsi_exit_level}).",
+                        flush=True,
+                    )
+                    _close_long_market(
+                        client=binance_client,
+                        symbol=args.symbol,
+                        step_size=step_size,
+                    )
+
+        except Exception as e:
+            # No detenemos el proceso por fallos de red/datos
+            print(f"[LIVE] Error en el bucle: {e}", flush=True)
+
+        # Mantener Render activo
+        time.sleep(60)
 
 
 if __name__ == "__main__":
