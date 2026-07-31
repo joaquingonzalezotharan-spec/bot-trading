@@ -1,0 +1,19 @@
+# Dockerfile (para cloud) - ejecución del bot
+#
+# Nota: el modo LIVE requiere 'ccxt' (incluido en lista_librerias.txt).
+# Si el objetivo es hacer solo backtest, igual puedes usar la misma imagen.
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY bot_futuros.py /app/
+COPY lista_librerias.txt /app/
+
+RUN pip install --no-cache-dir -r lista_librerias.txt
+
+ENV PYTHONUNBUFFERED=1
+
+# Por defecto ejecuta backtest. Para live, sobrescribe CMD por ejemplo:
+# docker run ... python3 bot_futuros.py --live --exchange binance --symbol BTC/USDT
+CMD ["python3", "bot_futuros.py"]
