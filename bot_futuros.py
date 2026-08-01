@@ -74,18 +74,21 @@ class StrategyConfig:
     interval_minutes: int = 5
 
     # Indicadores
-    rsi_length: int = 7
+    rsi_length: int = 14
     bb_length: int = 20
     bb_std_mult: float = 2.0
 
     rsi_entry_level: float = 25.0
     rsi_exit_level: float = 75.0
 
+    ema_length: int = 200
+
     # Riesgo / ejecución
     leverage: int = 5
-    margin_fraction: float = 0.20  # 20% del margen disponible
+    margin_per_trade_usdt: float = 2.0  # $2 de margen por operación (con 5x => nominal $10)
 
-    stop_loss_pct: float = 0.015  # 1.5% desde el precio de entrada
+    stop_loss_pct: float = 0.0030  # -0.30% desde el precio de entrada
+    take_profit_pct: float = 0.0035  # +0.35% desde el precio de entrada
 
 
 # -----------------------------
@@ -183,9 +186,14 @@ def _download_with_yfinance(
 # -----------------------------
 def prepare_indicators(df: pd.DataFrame, cfg: StrategyConfig) -> pd.DataFrame:
     """
-    Calcula RSI corto (7) y Bandas de Bollinger (20, 2σ) con pandas y genera señales:
-    - long_signal: cruza por debajo de BB inferior y RSI <= 25
-    - exit_signal: toca/supera BB superior o RSI > 75
+    Calcula:
+    - RSI (14)
+    - Bandas de Bollinger (20, 2σ)
+    - EMA 200
+
+    Señales:
+    - long_signal: cruza por debajo de BB inferior + RSI <= 25 + close > EMA200
+    - exit_signal: toca/supera BB superior (usando high) o RSI > 75
     """
     out = df.copy()
 
@@ -210,7 +218,9 @@ def prepare_indicators(df: pd.DataFrame, cfg: StrategyConfig) -> pd.DataFrame:
     out["bb_upper"] = out["bb_middle"] + cfg.bb_std_mult * out["bb_std"]
     out["bb_lower"] = out["bb_middle"] - cfg.bb_std_mult * out["bb_std"]
 
-    out = out.dropna(subset=["rsi", "bb_upper", "bb_lower"]).reset_index(drop=True)
+    out["ema200"] = out["close"].ewm(span=cfg.ema_length, adjust=False).mean()
+
+    out = out.dropna(subset=["rsi", "bb_upper", "bb_lower", "ema200"]).reset_index(drop=True)
 
     # -----------------------------
     # Reglas del bot
@@ -223,7 +233,9 @@ def prepare_indicators(df: pd.DataFrame, cfg: StrategyConfig) -> pd.DataFrame:
     out["bb_cross_below_lower"] = (prev_close >= prev_lower) & (out["close"] < out["bb_lower"])
 
     # Compra (LONG)
-    out["long_signal"] = out["bb_cross_below_lower"] & (out["rsi"] <= cfg.rsi_entry_level)
+    out["long_signal"] = (
+        out["bb_cross_below_lower"] & (out["rsi"] <= cfg.rsi_entry_level) & (out["close"] > out["ema200"])
+    )
 
     # Venta / Cierre de LONG:
     # - toca o supera BB superior (usamos high para ser más realista en velas)
@@ -654,14 +666,18 @@ def _place_long_with_stop(
     entry_price: float,
 ) -> None:
     """
-    Abre una posición LONG MARKET y crea un STOP_MARKET de protección 1.5%.
+    Abre una posición LONG MARKET y crea órdenes:
+    - STOP_MARKET (Stop Loss) a -0.30%
+    - TAKE_PROFIT_MARKET (Take Profit) a +0.35%
     """
     available_usdt = _get_available_margin_usdt(client)
-    if available_usdt <= 0:
-        raise RuntimeError("availableBalance <= 0, no se puede dimensionar la orden.")
+    if available_usdt < cfg.margin_per_trade_usdt:
+        raise RuntimeError(
+            f"Margen insuficiente: availableBalance={available_usdt} < margin_per_trade_usdt={cfg.margin_per_trade_usdt}"
+        )
 
-    # Queremos usar exactamente el 20% del margen disponible.
-    margin_to_use = available_usdt * cfg.margin_fraction
+    # Tamaño fijo: $2 de margen * 5x => ~$10 nominal.
+    margin_to_use = cfg.margin_per_trade_usdt
     notional = margin_to_use * cfg.leverage
     raw_qty = notional / entry_price
     quantity = _round_down_to_step(raw_qty, step_size)
@@ -685,8 +701,18 @@ def _place_long_with_stop(
         reduceOnly=True,
     )
 
+    take_profit_price = _round_down_to_tick(entry_price * (1.0 + cfg.take_profit_pct), tick_size)
+    client.futures_create_order(
+        symbol=symbol,
+        side="SELL",
+        type="TAKE_PROFIT_MARKET",
+        quantity=quantity,
+        stopPrice=take_profit_price,
+        reduceOnly=True,
+    )
+
     enviar_telegram(
-        f"[OPEN LONG] {symbol} | entrada={entry_price:.2f} | SL={stop_price:.2f} | qty={quantity}"
+        f"[OPEN LONG] {symbol} | entrada={entry_price:.2f} | SL={stop_price:.2f} | TP={take_profit_price:.2f} | qty={quantity}"
     )
 
 
@@ -721,7 +747,7 @@ def _close_long_market(
 # Punto de entrada (main)
 # -----------------------------
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Bot futuros BTC (5m) con RSI(7) + Bollinger y órdenes reales en Binance.")
+    parser = argparse.ArgumentParser(description="Bot futuros BTC (5m) con RSI(14) + Bollinger + EMA200 y órdenes reales en Binance.")
     parser.add_argument("--lookback-days", type=int, default=2, help="Días hacia atrás para descargar datos con yfinance.")
     parser.add_argument("--interval", type=str, default="5m", help="Intervalo (por defecto: 5m).")
     parser.add_argument("--symbol", type=str, default="BTCUSDT", help="Símbolo Binance USDT-M (ej: BTCUSDT).")
@@ -754,7 +780,7 @@ def main() -> None:
         )
 
     enviar_telegram(
-        f"[BOT INICIADO] symbol={args.symbol} | interval={args.interval} | leverage={cfg.leverage}x | margin_fraction={cfg.margin_fraction}"
+        f"[BOT INICIADO] symbol={args.symbol} | interval={args.interval} | leverage={cfg.leverage}x | margin_per_trade_usdt={cfg.margin_per_trade_usdt}"
     )
 
     last_processed_ts: Optional[pd.Timestamp] = None
