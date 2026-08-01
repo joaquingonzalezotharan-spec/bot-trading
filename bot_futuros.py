@@ -57,6 +57,70 @@ def enviar_telegram(mensaje: str) -> None:
         print(f"[TELEGRAM] No se pudo enviar mensaje: {e}", flush=True)
 
 
+REPORT_INTERVAL_S = 4 * 60 * 60  # 4 horas
+
+
+def _align_next_report_epoch_seconds(now_epoch_s: float, interval_s: float) -> float:
+    """
+    Alinea el próximo reporte a un múltiplo del intervalo (referencia Unix epoch, UTC).
+    """
+    interval_s = float(interval_s)
+    now_epoch_s = float(now_epoch_s)
+    next_k = int(now_epoch_s // interval_s) + 1
+    return next_k * interval_s
+
+
+def _format_signed_usdt(value: float) -> str:
+    sign = "+" if value >= 0 else "-"
+    return f"{sign}{abs(value):.2f} USDT"
+
+
+def _calc_pnl_usdt(is_long: bool, entry_price: float, exit_price: float, quantity: float) -> float:
+    """
+    Aproximación de PnL en USDT por diferencia de precio * cantidad.
+    Nota: no incluye comisiones ni funding.
+    """
+    if is_long:
+        return (exit_price - entry_price) * quantity
+    return (entry_price - exit_price) * quantity
+
+
+def _build_periodic_report_message(
+    *,
+    regime: str,
+    operations: List[str],
+    net_pnl_usdt: float,
+    available_balance_usdt: Optional[float],
+) -> str:
+    ops_preview_limit = 30
+    ops_count = len(operations)
+    if ops_count == 0:
+        ops_block = "Sin operaciones en las últimas 4 horas."
+    else:
+        shown = operations[:ops_preview_limit]
+        ops_block = "\n".join([f"- {x}" for x in shown])
+        if ops_count > ops_preview_limit:
+            ops_block += f"\n- ... y {ops_count - ops_preview_limit} operación(es) adicionales."
+
+    if available_balance_usdt is None:
+        balance_block = "Balance Binance disponible: N/A"
+    else:
+        balance_block = f"Balance Binance disponible: {available_balance_usdt:.2f} USDT"
+
+    if net_pnl_usdt >= 0:
+        net_block = f"Ganancias netas (USDT): {_format_signed_usdt(net_pnl_usdt)}"
+    else:
+        net_block = f"Pérdidas netas (USDT): {_format_signed_usdt(net_pnl_usdt)}"
+
+    return (
+        "📊 RESUMEN PERIÓDICO DEL BOT\n"
+        f"Régimen de Mercado actual: {regime}\n"
+        f"Operaciones ejecutadas (últimas 4 horas):\n{ops_block}\n"
+        f"{net_block}\n"
+        f"{balance_block}"
+    )
+
+
 # -----------------------------
 # Configuración de la estrategia
 # -----------------------------
@@ -870,11 +934,18 @@ def main() -> None:
     in_long_state = False
     in_short_state = False
     entry_price_state: Optional[float] = None
+    entry_quantity_state: Optional[float] = None
 
     regime_lookback = 10
     cross_window = 6
 
     print("[LIVE] Bot activo: detectando régimen y operando con BB+RSI+EMA200...", flush=True)
+
+    # Métricas de la ventana actual de 4 horas (reiniciadas tras cada reporte).
+    period_operations: List[str] = []
+    period_net_pnl_usdt: float = 0.0
+    last_detected_regime: str = "LATERAL"
+    next_report_epoch_s = _align_next_report_epoch_seconds(time.time(), REPORT_INTERVAL_S)
 
     while True:
         try:
@@ -928,6 +999,8 @@ def main() -> None:
             else:
                 print("[LIVE] Régimen Detectado: MERCADO LATERAL (Rango)", flush=True)
 
+            last_detected_regime = regime
+
             if binance_client is None:
                 time.sleep(60)
                 continue
@@ -941,19 +1014,45 @@ def main() -> None:
             # Cierres por STOP/TP (notificar al detectar transición)
             if in_long_state and (not in_long) and entry_price_state is not None:
                 exit_price = last_close
+                if entry_quantity_state is not None:
+                    pnl_usdt = _calc_pnl_usdt(
+                        is_long=True,
+                        entry_price=float(entry_price_state),
+                        exit_price=float(exit_price),
+                        quantity=float(entry_quantity_state),
+                    )
+                    period_net_pnl_usdt += pnl_usdt
+                    now_utc = datetime.now(timezone.utc)
+                    period_operations.append(
+                        f"{now_utc.strftime('%H:%M UTC')} CLOSE LONG | entrada={entry_price_state:.2f} | salida={exit_price:.2f} | PnL={pnl_usdt:.2f} USDT"
+                    )
                 pnl_pct = (exit_price - entry_price_state) / entry_price_state * 100.0
                 signo = "GANANCIA" if pnl_pct >= 0 else "PERDIDA"
                 enviar_telegram(f"[CLOSE LONG] {args.symbol} | entrada={entry_price_state:.2f} | salida={exit_price:.2f} | PnL={pnl_pct:.4f}% ({signo})")
                 in_long_state = False
                 entry_price_state = None
+                entry_quantity_state = None
 
             if in_short_state and (not in_short) and entry_price_state is not None:
                 exit_price = last_close
+                if entry_quantity_state is not None:
+                    pnl_usdt = _calc_pnl_usdt(
+                        is_long=False,
+                        entry_price=float(entry_price_state),
+                        exit_price=float(exit_price),
+                        quantity=float(entry_quantity_state),
+                    )
+                    period_net_pnl_usdt += pnl_usdt
+                    now_utc = datetime.now(timezone.utc)
+                    period_operations.append(
+                        f"{now_utc.strftime('%H:%M UTC')} CLOSE SHORT | entrada={entry_price_state:.2f} | salida={exit_price:.2f} | PnL={pnl_usdt:.2f} USDT"
+                    )
                 pnl_pct = (entry_price_state - exit_price) / entry_price_state * 100.0
                 signo = "GANANCIA" if pnl_pct >= 0 else "PERDIDA"
                 enviar_telegram(f"[CLOSE SHORT] {args.symbol} | entrada={entry_price_state:.2f} | salida={exit_price:.2f} | PnL={pnl_pct:.4f}% ({signo})")
                 in_short_state = False
                 entry_price_state = None
+                entry_quantity_state = None
 
             long_entry_lateral = bool(last["long_entry_lateral"])
             long_exit_lateral = bool(last["long_exit_lateral"])
@@ -968,14 +1067,17 @@ def main() -> None:
                     _place_long_with_stop(binance_client, args.symbol, cfg, step_size, tick_size, last_close, cfg.sl_lateral_pct, cfg.tp_lateral_pct)
                     in_long_state = True
                     entry_price_state = last_close
+                    entry_quantity_state = _round_up_to_step(cfg.fixed_quantity, step_size)
                 elif regime == "ALCISTA" and long_entry_bullish:
                     _place_long_with_stop(binance_client, args.symbol, cfg, step_size, tick_size, last_close, cfg.sl_bullish_pct, cfg.tp_bullish_pct)
                     in_long_state = True
                     entry_price_state = last_close
+                    entry_quantity_state = _round_up_to_step(cfg.fixed_quantity, step_size)
                 elif regime == "BAJISTA" and short_entry_bearish:
                     _place_short_with_sl_tp(binance_client, args.symbol, cfg, step_size, tick_size, last_close, cfg.sl_bearish_pct, cfg.tp_bearish_pct)
                     in_short_state = True
                     entry_price_state = last_close
+                    entry_quantity_state = _round_up_to_step(cfg.fixed_quantity, step_size)
 
             # Cierres manuales por señal
             else:
@@ -983,29 +1085,95 @@ def main() -> None:
                     if regime == "LATERAL" and long_exit_lateral:
                         _close_long_market(binance_client, args.symbol, step_size=step_size)
                         exit_price = last_close
+                        if entry_quantity_state is not None:
+                            pnl_usdt = _calc_pnl_usdt(
+                                is_long=True,
+                                entry_price=float(entry_price_state) if entry_price_state is not None else 0.0,
+                                exit_price=float(exit_price),
+                                quantity=float(entry_quantity_state),
+                            )
+                            period_net_pnl_usdt += pnl_usdt
+                            now_utc = datetime.now(timezone.utc)
+                            period_operations.append(
+                                f"{now_utc.strftime('%H:%M UTC')} CLOSE LONG | entrada={entry_price_state:.2f} | salida={exit_price:.2f} | PnL={pnl_usdt:.2f} USDT"
+                            )
                         pnl_pct = (exit_price - entry_price_state) / entry_price_state * 100.0
                         signo = "GANANCIA" if pnl_pct >= 0 else "PERDIDA"
                         enviar_telegram(f"[CLOSE LONG] {args.symbol} | entrada={entry_price_state:.2f} | salida={exit_price:.2f} | PnL={pnl_pct:.4f}% ({signo})")
                         in_long_state = False
                         entry_price_state = None
+                        entry_quantity_state = None
                     elif regime == "ALCISTA" and long_exit_bullish:
                         _close_long_market(binance_client, args.symbol, step_size=step_size)
                         exit_price = last_close
+                        if entry_quantity_state is not None:
+                            pnl_usdt = _calc_pnl_usdt(
+                                is_long=True,
+                                entry_price=float(entry_price_state) if entry_price_state is not None else 0.0,
+                                exit_price=float(exit_price),
+                                quantity=float(entry_quantity_state),
+                            )
+                            period_net_pnl_usdt += pnl_usdt
+                            now_utc = datetime.now(timezone.utc)
+                            period_operations.append(
+                                f"{now_utc.strftime('%H:%M UTC')} CLOSE LONG | entrada={entry_price_state:.2f} | salida={exit_price:.2f} | PnL={pnl_usdt:.2f} USDT"
+                            )
                         pnl_pct = (exit_price - entry_price_state) / entry_price_state * 100.0
                         signo = "GANANCIA" if pnl_pct >= 0 else "PERDIDA"
                         enviar_telegram(f"[CLOSE LONG] {args.symbol} | entrada={entry_price_state:.2f} | salida={exit_price:.2f} | PnL={pnl_pct:.4f}% ({signo})")
                         in_long_state = False
                         entry_price_state = None
+                        entry_quantity_state = None
 
                 if in_short_state:
                     if regime == "BAJISTA" and short_exit_bearish:
                         _close_short_market(binance_client, args.symbol, step_size=step_size)
                         exit_price = last_close
+                        if entry_quantity_state is not None:
+                            pnl_usdt = _calc_pnl_usdt(
+                                is_long=False,
+                                entry_price=float(entry_price_state) if entry_price_state is not None else 0.0,
+                                exit_price=float(exit_price),
+                                quantity=float(entry_quantity_state),
+                            )
+                            period_net_pnl_usdt += pnl_usdt
+                            now_utc = datetime.now(timezone.utc)
+                            period_operations.append(
+                                f"{now_utc.strftime('%H:%M UTC')} CLOSE SHORT | entrada={entry_price_state:.2f} | salida={exit_price:.2f} | PnL={pnl_usdt:.2f} USDT"
+                            )
                         pnl_pct = (entry_price_state - exit_price) / entry_price_state * 100.0
                         signo = "GANANCIA" if pnl_pct >= 0 else "PERDIDA"
                         enviar_telegram(f"[CLOSE SHORT] {args.symbol} | entrada={entry_price_state:.2f} | salida={exit_price:.2f} | PnL={pnl_pct:.4f}% ({signo})")
                         in_short_state = False
                         entry_price_state = None
+                        entry_quantity_state = None
+
+            # Enviar reporte periódico cada 4 horas (alineado por epoch, UTC).
+            now_epoch_s = time.time()
+            if now_epoch_s >= next_report_epoch_s:
+                available_balance_usdt: Optional[float] = None
+                if binance_client is not None:
+                    try:
+                        available_balance_usdt = _get_available_margin_usdt(binance_client)
+                    except Exception:
+                        available_balance_usdt = None
+
+                report_msg = _build_periodic_report_message(
+                    regime=last_detected_regime,
+                    operations=period_operations,
+                    net_pnl_usdt=period_net_pnl_usdt,
+                    available_balance_usdt=available_balance_usdt,
+                )
+                enviar_telegram(report_msg)
+
+                # Reinicio de métricas para el nuevo ciclo de 4 horas.
+                period_operations = []
+                period_net_pnl_usdt = 0.0
+
+                next_report_epoch_s = next_report_epoch_s + REPORT_INTERVAL_S
+                if next_report_epoch_s <= now_epoch_s:
+                    next_report_epoch_s = _align_next_report_epoch_seconds(now_epoch_s, REPORT_INTERVAL_S)
+                print("[REPORT] Enviado resumen periódico 4h.", flush=True)
 
         except Exception as e:
             print(f"[LIVE] Error en el bucle: {e}", flush=True)
