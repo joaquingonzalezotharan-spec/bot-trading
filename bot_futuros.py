@@ -70,25 +70,34 @@ def enviar_telegram(mensaje: str) -> None:
 # -----------------------------
 @dataclass
 class StrategyConfig:
-    # Parámetros de la estrategia
-    interval_minutes: int = 5
-
     # Indicadores
     rsi_length: int = 14
     bb_length: int = 20
     bb_std_mult: float = 2.0
-
-    rsi_entry_level: float = 25.0
-    rsi_exit_level: float = 75.0
-
     ema_length: int = 200
 
-    # Riesgo / ejecución
-    leverage: int = 5
-    margin_per_trade_usdt: float = 2.0  # $2 de margen por operación (con 5x => nominal $10)
+    # Trading fijo (para evitar rechazos por quantity mínima)
+    fixed_quantity: float = 0.0015
 
-    stop_loss_pct: float = 0.0030  # -0.30% desde el precio de entrada
-    take_profit_pct: float = 0.0035  # +0.35% desde el precio de entrada
+    # Apalancamiento (configurado en Binance al iniciar)
+    leverage: int = 5
+
+    # Lateral (Rango)
+    lateral_rsi_entry: float = 30.0
+    lateral_rsi_exit: float = 70.0
+    sl_lateral_pct: float = 0.0030   # -0.30%
+    tp_lateral_pct: float = 0.0035   # +0.35%
+
+    # Alcista (Up)
+    bullish_rsi_entry: float = 45.0
+    sl_bullish_pct: float = 0.0040   # -0.40%
+    tp_bullish_pct: float = 0.0100   # +1.00%
+
+    # Bajista (Down / Short)
+    bearish_rsi_entry: float = 65.0
+    bearish_rsi_exit: float = 35.0
+    sl_bearish_pct: float = 0.0040   # +0.40% (SL arriba para Short)
+    tp_bearish_pct: float = 0.0080   # -0.80% (TP abajo para Short)
 
 
 # -----------------------------
@@ -186,14 +195,15 @@ def _download_with_yfinance(
 # -----------------------------
 def prepare_indicators(df: pd.DataFrame, cfg: StrategyConfig) -> pd.DataFrame:
     """
-    Calcula:
+    Calcula indicadores base para 3 regímenes:
     - RSI (14)
-    - Bandas de Bollinger (20, 2σ)
-    - EMA 200
+    - Bollinger Bands (20, 2σ): bb_middle / bb_upper / bb_lower
+    - EMA 200 (filtro de tendencia)
 
-    Señales:
-    - long_signal: cruza por debajo de BB inferior + RSI <= 25 + close > EMA200
-    - exit_signal: toca/supera BB superior (usando high) o RSI > 75
+    Además, prepara señales booleanas para cada estrategia:
+    - lateral: long_entry_lateral / long_exit_lateral
+    - bullish: long_entry_bullish / long_exit_bullish
+    - bearish (short): short_entry_bearish / short_exit_bearish
     """
     out = df.copy()
 
@@ -222,25 +232,32 @@ def prepare_indicators(df: pd.DataFrame, cfg: StrategyConfig) -> pd.DataFrame:
 
     out = out.dropna(subset=["rsi", "bb_upper", "bb_lower", "ema200"]).reset_index(drop=True)
 
-    # -----------------------------
-    # Reglas del bot
-    # -----------------------------
-    # Cruce por debajo de la BB inferior:
-    # - en la vela anterior el close estaba >= bb_lower
-    # - en la vela actual el close está < bb_lower
+    # BB superior expandida (4σ): bb_middle + 4 * std  (como bb_upper ya es 2σ)
+    out["bb_upper_expanded"] = out["bb_middle"] + 2.0 * (out["bb_upper"] - out["bb_middle"])
+
+    # Cruce por debajo de la banda inferior (close cruza bajo BB inferior)
     prev_close = out["close"].shift(1)
     prev_lower = out["bb_lower"].shift(1)
     out["bb_cross_below_lower"] = (prev_close >= prev_lower) & (out["close"] < out["bb_lower"])
 
-    # Compra (LONG)
-    out["long_signal"] = (
-        out["bb_cross_below_lower"] & (out["rsi"] <= cfg.rsi_entry_level) & (out["close"] > out["ema200"])
-    )
+    # LATERAL (Rango)
+    out["long_entry_lateral"] = out["bb_cross_below_lower"] & (out["rsi"] <= cfg.lateral_rsi_entry)
+    out["long_exit_lateral"] = (out["high"] >= out["bb_upper"]) | (out["rsi"] > cfg.lateral_rsi_exit)
 
-    # Venta / Cierre de LONG:
-    # - toca o supera BB superior (usamos high para ser más realista en velas)
-    # - o RSI > 75
-    out["exit_signal"] = (out["high"] >= out["bb_upper"]) | (out["rsi"] > cfg.rsi_exit_level)
+    # ALCISTA (Up)
+    # Retroceso: toque línea media de Bollinger (usamos low <= bb_middle)
+    out["long_entry_bullish"] = (out["close"] > out["ema200"]) & (out["low"] <= out["bb_middle"]) & (
+        out["rsi"] <= cfg.bullish_rsi_entry
+    )
+    out["long_exit_bullish"] = out["high"] >= out["bb_upper_expanded"]
+
+    # BAJISTA (Down / Short)
+    # Rebound hacia arriba: toca banda superior o línea media + RSI alto
+    out["short_entry_bearish"] = (
+        ((out["high"] >= out["bb_upper"]) | (out["high"] >= out["bb_middle"]))
+        & (out["rsi"] >= cfg.bearish_rsi_entry)
+    )
+    out["short_exit_bearish"] = (out["low"] <= out["bb_lower"]) | (out["rsi"] < cfg.bearish_rsi_exit)
 
     return out
 
@@ -674,16 +691,15 @@ def _place_long_with_stop(
     step_size: float,
     tick_size: float,
     entry_price: float,
+    sl_pct: float,
+    tp_pct: float,
 ) -> None:
     """
     Abre una posición LONG MARKET y crea órdenes:
-    - STOP_MARKET (Stop Loss) a -0.30%
-    - TAKE_PROFIT_MARKET (Take Profit) a +0.35%
+    - STOP_MARKET (Stop Loss) a entry*(1 - sl_pct)
+    - TAKE_PROFIT_MARKET (Take Profit) a entry*(1 + tp_pct)
     """
-    # Ajuste fijo para evitar rechazos por mínimo en Binance:
-    # Entramos con ~0.0015 BTC (y redondeamos hacia arriba al stepSize permitido).
-    fixed_quantity = 0.0015
-    quantity = _round_up_to_step(fixed_quantity, step_size)
+    quantity = _round_up_to_step(cfg.fixed_quantity, step_size)
     if quantity <= 0:
         raise RuntimeError("Cantidad calculada inválida (<= 0).")
 
@@ -694,7 +710,7 @@ def _place_long_with_stop(
         quantity=quantity,
     )
 
-    stop_price = _round_down_to_tick(entry_price * (1.0 - cfg.stop_loss_pct), tick_size)
+    stop_price = _round_down_to_tick(entry_price * (1.0 - sl_pct), tick_size)
     client.futures_create_order(
         symbol=symbol,
         side="SELL",
@@ -704,7 +720,7 @@ def _place_long_with_stop(
         reduceOnly=True,
     )
 
-    take_profit_price = _round_down_to_tick(entry_price * (1.0 + cfg.take_profit_pct), tick_size)
+    take_profit_price = _round_down_to_tick(entry_price * (1.0 + tp_pct), tick_size)
     client.futures_create_order(
         symbol=symbol,
         side="SELL",
@@ -746,29 +762,103 @@ def _close_long_market(
     )
 
 
+def _place_short_with_sl_tp(
+    client: "Client",
+    symbol: str,
+    cfg: StrategyConfig,
+    step_size: float,
+    tick_size: float,
+    entry_price: float,
+    sl_pct: float,
+    tp_pct: float,
+) -> None:
+    """
+    Abre una posición SHORT MARKET y crea órdenes:
+    - STOP_MARKET (Stop Loss) a entry*(1 + sl_pct)
+    - TAKE_PROFIT_MARKET (Take Profit) a entry*(1 - tp_pct)
+    """
+    quantity = _round_up_to_step(cfg.fixed_quantity, step_size)
+    if quantity <= 0:
+        raise RuntimeError("Cantidad calculada inválida (<= 0).")
+
+    # Entrada SHORT
+    client.futures_create_order(
+        symbol=symbol,
+        side="SELL",
+        type="MARKET",
+        quantity=quantity,
+    )
+
+    stop_price = _round_down_to_tick(entry_price * (1.0 + sl_pct), tick_size)
+    client.futures_create_order(
+        symbol=symbol,
+        side="BUY",
+        type="STOP_MARKET",
+        quantity=quantity,
+        stopPrice=stop_price,
+        reduceOnly=True,
+    )
+
+    take_profit_price = _round_down_to_tick(entry_price * (1.0 - tp_pct), tick_size)
+    client.futures_create_order(
+        symbol=symbol,
+        side="BUY",
+        type="TAKE_PROFIT_MARKET",
+        quantity=quantity,
+        stopPrice=take_profit_price,
+        reduceOnly=True,
+    )
+
+    enviar_telegram(
+        f"[OPEN SHORT] {symbol} | entrada={entry_price:.2f} | SL={stop_price:.2f} | TP={take_profit_price:.2f} | qty={quantity}"
+    )
+
+
+def _close_short_market(
+    client: "Client",
+    symbol: str,
+    step_size: float,
+) -> None:
+    """
+    Cierra SHORT con una orden MARKET BUY (reduceOnly) usando positionAmt actual.
+    """
+    position_amt = _get_open_position_amt(client, symbol)
+    if position_amt >= 0:
+        return
+
+    quantity = _round_down_to_step(abs(position_amt), step_size)
+    if quantity <= 0:
+        return
+
+    _cancel_all_open_orders(client, symbol)
+
+    client.futures_create_order(
+        symbol=symbol,
+        side="BUY",
+        type="MARKET",
+        quantity=quantity,
+        reduceOnly=True,
+    )
+
+
 # -----------------------------
 # Punto de entrada (main)
 # -----------------------------
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Bot futuros BTC (5m) con RSI(14) + Bollinger + EMA200 y órdenes reales en Binance.")
+    parser = argparse.ArgumentParser(description="Bot Futuros BTC con 3 regímenes: Lateral/Alcista/Bajista (Long/Short).")
     parser.add_argument("--lookback-days", type=int, default=2, help="Días hacia atrás para descargar datos con yfinance.")
     parser.add_argument("--interval", type=str, default="5m", help="Intervalo (por defecto: 5m).")
     parser.add_argument("--symbol", type=str, default="BTCUSDT", help="Símbolo Binance USDT-M (ej: BTCUSDT).")
     args = parser.parse_args()
 
     cfg = StrategyConfig()
-
     binance_client = get_binance_futures_client()
     step_size: Optional[float] = None
     tick_size: Optional[float] = None
 
     if binance_client is None:
-        print(
-            "[LIVE] Sin credenciales BINANCE_API_KEY/BINANCE_API_SECRET o python-binance no instalado; se ejecutará en modo señal (sin órdenes).",
-            flush=True,
-        )
+        print("[LIVE] Sin credenciales Binance o python-binance; modo señal (sin órdenes).", flush=True)
     else:
-        # 1) Configurar apalancamiento 5x al inicio
         try:
             binance_client.futures_change_leverage(symbol=args.symbol, leverage=cfg.leverage)
             print(f"[LIVE] Leverage configurado: {cfg.leverage}x para {args.symbol}.", flush=True)
@@ -776,111 +866,155 @@ def main() -> None:
         except Exception as e:
             print(f"[LIVE] No pude configurar leverage ({e}). Continuo.", flush=True)
 
-        # 2) Obtener filtros para rounding correcto
         step_size, tick_size = _get_futures_symbol_filters(binance_client, args.symbol)
-        print(
-            f"[LIVE] Filtros Binance: step_size={step_size} | tick_size={tick_size}",
-            flush=True,
-        )
+        print(f"[LIVE] Filtros Binance: step_size={step_size} | tick_size={tick_size}", flush=True)
 
-    enviar_telegram(
-        f"[BOT INICIADO] symbol={args.symbol} | interval={args.interval} | leverage={cfg.leverage}x | margin_per_trade_usdt={cfg.margin_per_trade_usdt}"
-    )
+    enviar_telegram(f"[BOT INICIADO] symbol={args.symbol} | interval={args.interval} | leverage={cfg.leverage}x | fixed_quantity={cfg.fixed_quantity}")
 
     last_processed_ts: Optional[pd.Timestamp] = None
     in_long_state = False
+    in_short_state = False
     entry_price_state: Optional[float] = None
-    print("[LIVE] Estrategia activa. Revisando mercado continuamente...", flush=True)
+
+    regime_lookback = 10
+    cross_window = 6
+
+    print("[LIVE] Bot activo: detectando régimen y operando con BB+RSI+EMA200...", flush=True)
 
     while True:
         try:
             print("[LIVE] Revisando mercado real...", flush=True)
 
             df_live = download_btc_ohlcv(lookback_days=args.lookback_days, interval=args.interval)
+            if df_live.empty:
+                time.sleep(60)
+                continue
+
             for c in ["open", "high", "low", "close"]:
                 df_live[c] = df_live[c].astype(float)
             df_live = df_live.sort_values("date").reset_index(drop=True)
 
-            df_ind_live = prepare_indicators(df_live, cfg)
-            if df_ind_live.empty:
+            df_ind = prepare_indicators(df_live, cfg)
+            if df_ind.empty:
                 time.sleep(60)
                 continue
 
-            last = df_ind_live.iloc[-1]
+            last = df_ind.iloc[-1]
             current_ts = last["date"]
             if last_processed_ts is not None and current_ts == last_processed_ts:
                 time.sleep(60)
                 continue
-
             last_processed_ts = current_ts
 
-            long_signal = bool(last["long_signal"])
-            exit_signal = bool(last["exit_signal"])
             last_close = float(last["close"])
+            last_ema200 = float(last["ema200"])
+
+            window = df_ind.tail(regime_lookback)
+            slope_bb = float(window["bb_middle"].iloc[-1] - window["bb_middle"].iloc[0])
+            rel_slope = slope_bb / last_close if last_close else 0.0
+
+            rel = window["close"] - window["bb_middle"]
+            crosses = (((rel.shift(1) >= 0) & (rel < 0)) | ((rel.shift(1) <= 0) & (rel > 0))).tail(cross_window).sum()
+            bands_horizontal = abs(rel_slope) < 0.00005
+
+            if crosses >= 2 and bands_horizontal:
+                regime = "LATERAL"
+            elif last_close > last_ema200 and slope_bb > 0:
+                regime = "ALCISTA"
+            elif last_close < last_ema200 and slope_bb < 0:
+                regime = "BAJISTA"
+            else:
+                regime = "LATERAL"
+
+            if regime == "BAJISTA":
+                print("[LIVE] Régimen Detectado: MERCADO BAJISTA (Buscando Shorts)", flush=True)
+            elif regime == "ALCISTA":
+                print("[LIVE] Régimen Detectado: MERCADO ALCISTA (Buscando Longs)", flush=True)
+            else:
+                print("[LIVE] Régimen Detectado: MERCADO LATERAL (Rango)", flush=True)
 
             if binance_client is None:
-                if long_signal:
-                    print("[LIVE] Señal LONG detectada (modo señal, sin órdenes).", flush=True)
+                time.sleep(60)
                 continue
 
             assert step_size is not None and tick_size is not None
 
             position_amt = _get_open_position_amt(binance_client, symbol=args.symbol)
             in_long = position_amt > 0
+            in_short = position_amt < 0
 
-            # Notifica cierres que ocurren por STOP_MARKET u otras órdenes
+            # Cierres por STOP/TP (notificar al detectar transición)
             if in_long_state and (not in_long) and entry_price_state is not None:
                 exit_price = last_close
                 pnl_pct = (exit_price - entry_price_state) / entry_price_state * 100.0
                 signo = "GANANCIA" if pnl_pct >= 0 else "PERDIDA"
-                enviar_telegram(
-                    f"[CLOSE LONG] {args.symbol} | entrada={entry_price_state:.2f} | salida={exit_price:.2f} | PnL={pnl_pct:.4f}% ({signo})"
-                )
+                enviar_telegram(f"[CLOSE LONG] {args.symbol} | entrada={entry_price_state:.2f} | salida={exit_price:.2f} | PnL={pnl_pct:.4f}% ({signo})")
                 in_long_state = False
                 entry_price_state = None
 
-            if not in_long:
-                if long_signal:
-                    print(
-                        f"[LIVE] Ejecutando LONG: close={last_close:.2f} (RSI <= {cfg.rsi_entry_level}, BB cross).",
-                        flush=True,
-                    )
-                    _place_long_with_stop(
-                        client=binance_client,
-                        symbol=args.symbol,
-                        cfg=cfg,
-                        step_size=step_size,
-                        tick_size=tick_size,
-                        entry_price=last_close,
-                    )
+            if in_short_state and (not in_short) and entry_price_state is not None:
+                exit_price = last_close
+                pnl_pct = (entry_price_state - exit_price) / entry_price_state * 100.0
+                signo = "GANANCIA" if pnl_pct >= 0 else "PERDIDA"
+                enviar_telegram(f"[CLOSE SHORT] {args.symbol} | entrada={entry_price_state:.2f} | salida={exit_price:.2f} | PnL={pnl_pct:.4f}% ({signo})")
+                in_short_state = False
+                entry_price_state = None
+
+            long_entry_lateral = bool(last["long_entry_lateral"])
+            long_exit_lateral = bool(last["long_exit_lateral"])
+            long_entry_bullish = bool(last["long_entry_bullish"])
+            long_exit_bullish = bool(last["long_exit_bullish"])
+            short_entry_bearish = bool(last["short_entry_bearish"])
+            short_exit_bearish = bool(last["short_exit_bearish"])
+
+            # Aperturas si no hay posición
+            if (not in_long) and (not in_short):
+                if regime == "LATERAL" and long_entry_lateral:
+                    _place_long_with_stop(binance_client, args.symbol, cfg, step_size, tick_size, last_close, cfg.sl_lateral_pct, cfg.tp_lateral_pct)
                     in_long_state = True
                     entry_price_state = last_close
+                elif regime == "ALCISTA" and long_entry_bullish:
+                    _place_long_with_stop(binance_client, args.symbol, cfg, step_size, tick_size, last_close, cfg.sl_bullish_pct, cfg.tp_bullish_pct)
+                    in_long_state = True
+                    entry_price_state = last_close
+                elif regime == "BAJISTA" and short_entry_bearish:
+                    _place_short_with_sl_tp(binance_client, args.symbol, cfg, step_size, tick_size, last_close, cfg.sl_bearish_pct, cfg.tp_bearish_pct)
+                    in_short_state = True
+                    entry_price_state = last_close
+
+            # Cierres manuales por señal
             else:
-                if exit_signal:
-                    print(
-                        f"[LIVE] Ejecutando CLOSE LONG: close={last_close:.2f} (BB tocada o RSI> {cfg.rsi_exit_level}).",
-                        flush=True,
-                    )
-                    _close_long_market(
-                        client=binance_client,
-                        symbol=args.symbol,
-                        step_size=step_size,
-                    )
-                    if entry_price_state is not None:
+                if in_long_state:
+                    if regime == "LATERAL" and long_exit_lateral:
+                        _close_long_market(binance_client, args.symbol, step_size=step_size)
                         exit_price = last_close
                         pnl_pct = (exit_price - entry_price_state) / entry_price_state * 100.0
                         signo = "GANANCIA" if pnl_pct >= 0 else "PERDIDA"
-                        enviar_telegram(
-                            f"[CLOSE LONG] {args.symbol} | entrada={entry_price_state:.2f} | salida={exit_price:.2f} | PnL={pnl_pct:.4f}% ({signo})"
-                        )
-                    in_long_state = False
-                    entry_price_state = None
+                        enviar_telegram(f"[CLOSE LONG] {args.symbol} | entrada={entry_price_state:.2f} | salida={exit_price:.2f} | PnL={pnl_pct:.4f}% ({signo})")
+                        in_long_state = False
+                        entry_price_state = None
+                    elif regime == "ALCISTA" and long_exit_bullish:
+                        _close_long_market(binance_client, args.symbol, step_size=step_size)
+                        exit_price = last_close
+                        pnl_pct = (exit_price - entry_price_state) / entry_price_state * 100.0
+                        signo = "GANANCIA" if pnl_pct >= 0 else "PERDIDA"
+                        enviar_telegram(f"[CLOSE LONG] {args.symbol} | entrada={entry_price_state:.2f} | salida={exit_price:.2f} | PnL={pnl_pct:.4f}% ({signo})")
+                        in_long_state = False
+                        entry_price_state = None
+
+                if in_short_state:
+                    if regime == "BAJISTA" and short_exit_bearish:
+                        _close_short_market(binance_client, args.symbol, step_size=step_size)
+                        exit_price = last_close
+                        pnl_pct = (entry_price_state - exit_price) / entry_price_state * 100.0
+                        signo = "GANANCIA" if pnl_pct >= 0 else "PERDIDA"
+                        enviar_telegram(f"[CLOSE SHORT] {args.symbol} | entrada={entry_price_state:.2f} | salida={exit_price:.2f} | PnL={pnl_pct:.4f}% ({signo})")
+                        in_short_state = False
+                        entry_price_state = None
 
         except Exception as e:
-            # No detenemos el proceso por fallos de red/datos
             print(f"[LIVE] Error en el bucle: {e}", flush=True)
 
-        # Mantener Render activo
         time.sleep(60)
 
 
