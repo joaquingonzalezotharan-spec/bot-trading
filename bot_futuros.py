@@ -44,6 +44,31 @@ except Exception:
     Client = None  # type: ignore
 
 
+def enviar_telegram(mensaje: str) -> None:
+    """
+    Envía una notificación a Telegram usando variables de entorno:
+    - TELEGRAM_TOKEN
+    - TELEGRAM_CHAT_ID
+    """
+    token = os.environ.get("TELEGRAM_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        return
+
+    try:
+        import requests  # type: ignore
+
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        requests.post(
+            url,
+            data={"chat_id": chat_id, "text": mensaje},
+            timeout=10,
+        )
+    except Exception as e:
+        # Nunca detengamos el bot por fallos de notificación.
+        print(f"[TELEGRAM] No se pudo enviar mensaje: {e}", flush=True)
+
+
 # -----------------------------
 # Configuración de la estrategia
 # -----------------------------
@@ -651,6 +676,10 @@ def _place_long_with_stop(
         reduceOnly=True,
     )
 
+    enviar_telegram(
+        f"[OPEN LONG] {symbol} | entrada={entry_price:.2f} | SL={stop_price:.2f} | qty={quantity}"
+    )
+
 
 def _close_long_market(
     client: "Client",
@@ -715,7 +744,13 @@ def main() -> None:
             flush=True,
         )
 
+    enviar_telegram(
+        f"[BOT INICIADO] symbol={args.symbol} | interval={args.interval} | leverage={cfg.leverage}x | margin_fraction={cfg.margin_fraction}"
+    )
+
     last_processed_ts: Optional[pd.Timestamp] = None
+    in_long_state = False
+    entry_price_state: Optional[float] = None
     print("[LIVE] Estrategia activa. Revisando mercado continuamente...", flush=True)
 
     while True:
@@ -754,6 +789,17 @@ def main() -> None:
             position_amt = _get_open_position_amt(binance_client, symbol=args.symbol)
             in_long = position_amt > 0
 
+            # Notifica cierres que ocurren por STOP_MARKET u otras órdenes
+            if in_long_state and (not in_long) and entry_price_state is not None:
+                exit_price = last_close
+                pnl_pct = (exit_price - entry_price_state) / entry_price_state * 100.0
+                signo = "GANANCIA" if pnl_pct >= 0 else "PERDIDA"
+                enviar_telegram(
+                    f"[CLOSE LONG] {args.symbol} | entrada={entry_price_state:.2f} | salida={exit_price:.2f} | PnL={pnl_pct:.4f}% ({signo})"
+                )
+                in_long_state = False
+                entry_price_state = None
+
             if not in_long:
                 if long_signal:
                     print(
@@ -768,6 +814,8 @@ def main() -> None:
                         tick_size=tick_size,
                         entry_price=last_close,
                     )
+                    in_long_state = True
+                    entry_price_state = last_close
             else:
                 if exit_signal:
                     print(
@@ -779,6 +827,15 @@ def main() -> None:
                         symbol=args.symbol,
                         step_size=step_size,
                     )
+                    if entry_price_state is not None:
+                        exit_price = last_close
+                        pnl_pct = (exit_price - entry_price_state) / entry_price_state * 100.0
+                        signo = "GANANCIA" if pnl_pct >= 0 else "PERDIDA"
+                        enviar_telegram(
+                            f"[CLOSE LONG] {args.symbol} | entrada={entry_price_state:.2f} | salida={exit_price:.2f} | PnL={pnl_pct:.4f}% ({signo})"
+                        )
+                    in_long_state = False
+                    entry_price_state = None
 
         except Exception as e:
             # No detenemos el proceso por fallos de red/datos
