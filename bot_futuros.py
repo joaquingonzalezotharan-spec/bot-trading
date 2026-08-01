@@ -37,11 +37,7 @@ import pandas as pd
 import time
 from decimal import Decimal, ROUND_DOWN
 
-try:
-    # Para ejecución en vivo (futuros USDT-M). No se usa en el backtest.
-    from binance import Client  # type: ignore
-except Exception:
-    Client = None  # type: ignore
+from binance import Client  # type: ignore
 
 
 def enviar_telegram(mensaje: str) -> None:
