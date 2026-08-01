@@ -37,7 +37,7 @@ from typing import List, Optional
 
 import pandas as pd
 import time
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
 
 
 def enviar_telegram(mensaje: str) -> None:
@@ -592,6 +592,16 @@ def _round_down_to_step(quantity: float, step_size: float) -> float:
     return float(rounded)
 
 
+def _round_up_to_step(quantity: float, step_size: float) -> float:
+    """
+    Redondea hacia arriba según el stepSize para no caer por debajo del mínimo.
+    """
+    step = Decimal(str(step_size))
+    qty = Decimal(str(quantity))
+    rounded = (qty / step).to_integral_value(rounding=ROUND_UP) * step
+    return float(rounded)
+
+
 def _round_down_to_tick(price: float, tick_size: float) -> float:
     """
     Redondea hacia abajo según el tickSize para evitar errores de PRICE_FILTER.
@@ -670,19 +680,12 @@ def _place_long_with_stop(
     - STOP_MARKET (Stop Loss) a -0.30%
     - TAKE_PROFIT_MARKET (Take Profit) a +0.35%
     """
-    available_usdt = _get_available_margin_usdt(client)
-    if available_usdt < cfg.margin_per_trade_usdt:
-        raise RuntimeError(
-            f"Margen insuficiente: availableBalance={available_usdt} < margin_per_trade_usdt={cfg.margin_per_trade_usdt}"
-        )
-
-    # Tamaño fijo: $2 de margen * 5x => ~$10 nominal.
-    margin_to_use = cfg.margin_per_trade_usdt
-    notional = margin_to_use * cfg.leverage
-    raw_qty = notional / entry_price
-    quantity = _round_down_to_step(raw_qty, step_size)
+    # Ajuste fijo para evitar rechazos por mínimo en Binance:
+    # Entramos con ~0.0015 BTC (y redondeamos hacia arriba al stepSize permitido).
+    fixed_quantity = 0.0015
+    quantity = _round_up_to_step(fixed_quantity, step_size)
     if quantity <= 0:
-        raise RuntimeError("Cantidad redondeada a 0; revisa stepSize / precio / margen.")
+        raise RuntimeError("Cantidad calculada inválida (<= 0).")
 
     client.futures_create_order(
         symbol=symbol,
