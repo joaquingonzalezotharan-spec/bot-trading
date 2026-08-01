@@ -511,7 +511,13 @@ def get_binance_futures_client() -> Optional["Client"]:
     if not api_key or not api_secret:
         return None
 
-    return Client(api_key=api_key, api_secret=api_secret)
+    proxy_url = os.environ.get("PROXY_URL")
+    requests_params = None
+    if proxy_url:
+        proxies = {"http": proxy_url, "https": proxy_url}
+        requests_params = {"proxies": proxies}
+
+    return Client(api_key=api_key, api_secret=api_secret, requests_params=requests_params)
 
 
 def execute_futures_market_buy(
