@@ -769,6 +769,7 @@ def main() -> None:
         try:
             binance_client.futures_change_leverage(symbol=args.symbol, leverage=cfg.leverage)
             print(f"[LIVE] Leverage configurado: {cfg.leverage}x para {args.symbol}.", flush=True)
+            enviar_telegram("¡Hola! El bot de trading se ha conectado correctamente a Render y las notificaciones están activas. 🚀")
         except Exception as e:
             print(f"[LIVE] No pude configurar leverage ({e}). Continuo.", flush=True)
 
