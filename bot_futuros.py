@@ -539,6 +539,29 @@ def get_binance_futures_client() -> Optional["Client"]:
     proxy_url = os.environ.get("PROXY_URL")
     requests_params = None
     if proxy_url:
+        # Si PROXY_URL viene sin puerto (ej: "http://ip" o "ip"), requests caerá a puerto 80.
+        # Corregimos agregando el puerto residencial esperado.
+        from urllib.parse import urlparse
+
+        proxy_port = os.environ.get("PROXY_PORT", "50100")
+
+        # Aseguramos que tenga esquema para urlparse.
+        if "://" not in proxy_url:
+            proxy_url = f"http://{proxy_url}"
+
+        parsed = urlparse(proxy_url)
+        if parsed.port is None and parsed.hostname:
+            scheme = parsed.scheme or "http"
+
+            userinfo = ""
+            if parsed.username:
+                userinfo = parsed.username
+                if parsed.password:
+                    userinfo += f":{parsed.password}"
+                userinfo += "@"
+
+            proxy_url = f"{scheme}://{userinfo}{parsed.hostname}:{proxy_port}"
+
         proxies = {"http": proxy_url, "https": proxy_url}
         requests_params = {"proxies": proxies}
 
