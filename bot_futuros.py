@@ -1,27 +1,19 @@
 """
 bot_futuros.py
 
-Backtest educativo (simulación) de una estrategia en "futuros" para BTC/USDT usando:
-- RSI (14)
-- MACD (12, 26, 9)
-- Long: el RSI estuvo < 42 en cualquiera de las últimas 5 velas y hay cruce alcista MACD > MACD Signal
-- Salida: RSI > 70
-- Stop Loss: 1.5%
-- Take Profit: 4.5%
-- Trailing stop: 1.0%
+Bot educativo para BTCUSDT (Binance Futuros USDT-M) con 3 estrategias según el régimen:
 
-Descarga automática de datos históricos:
-- Usa yfinance (ticker: BTC-USD)
+1) Modo Lateral (Long): señal basada en Bollinger Bands + RSI (sin filtro EMA200).
+2) Modo Alcista (Long): señal basada en Bollinger Bands + RSI.
+3) Modo Bajista (Short): señal basada en Bollinger Bands + RSI.
 
-Uso rápido (en tu terminal):
-1) Instala dependencias:
-   pip install pandas yfinance
-2) Ejecuta:
-   python bot_futuros.py
+Incluye:
+- Detector automático de régimen (LATERAL/ALCISTA/BAJISTA) dentro de `main()`.
+- Órdenes con SL/TP y redondeo a `stepSize`/`tickSize`.
+- fixed_quantity = 0.0015 usando `_round_up_to_step()` para evitar quedarnos por debajo del mínimo.
 
-Notas para principiantes:
-- Esto es una simulación simple (no incluye apalancamiento, fees ni slippage).
-- Para un backtest serio se agregan costos, tamaño de posición, ejecución realista, etc.
+Descarga de datos:
+- Usa yfinance (ticker: BTC-USD).
 """
 
 from __future__ import annotations
@@ -245,10 +237,13 @@ def prepare_indicators(df: pd.DataFrame, cfg: StrategyConfig) -> pd.DataFrame:
     out["long_exit_lateral"] = (out["high"] >= out["bb_upper"]) | (out["rsi"] > cfg.lateral_rsi_exit)
 
     # ALCISTA (Up)
-    # Retroceso: toque línea media de Bollinger (usamos low <= bb_middle)
-    out["long_entry_bullish"] = (out["close"] > out["ema200"]) & (out["low"] <= out["bb_middle"]) & (
-        out["rsi"] <= cfg.bullish_rsi_entry
-    )
+    # Señal LONG basada en Bollinger Bands + RSI:
+    # - retroceso hacia la línea media (low <= bb_middle)
+    # - RSI en zona de entrada
+    #
+    # El EMA200 se utiliza en el DETECTOR de régimen, pero NO como filtro de la señal
+    # en este modo (para que la entrada sea BB+RSI puro).
+    out["long_entry_bullish"] = (out["low"] <= out["bb_middle"]) & (out["rsi"] <= cfg.bullish_rsi_entry)
     out["long_exit_bullish"] = out["high"] >= out["bb_upper_expanded"]
 
     # BAJISTA (Down / Short)
