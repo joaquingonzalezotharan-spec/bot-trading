@@ -947,13 +947,51 @@ def main() -> None:
     last_detected_regime: str = "LATERAL"
     next_report_epoch_s = _align_next_report_epoch_seconds(time.time(), REPORT_INTERVAL_S)
 
+    def _sleep_with_report(max_sleep_s: float) -> None:
+        """
+        Duerme como máximo `max_sleep_s`, pero sin pasar la hora exacta
+        del próximo reporte para reducir el retraso.
+        """
+        remaining = next_report_epoch_s - time.time()
+        if remaining <= 0:
+            return
+        time.sleep(min(float(max_sleep_s), float(remaining)))
+
     while True:
         try:
+            # Si ya toca enviar el reporte de 4 horas, lo hacemos antes de calcular
+            # señales/operaciones para minimizar el retraso.
+            now_epoch_s = time.time()
+            if now_epoch_s >= next_report_epoch_s:
+                available_balance_usdt: Optional[float] = None
+                if binance_client is not None:
+                    try:
+                        available_balance_usdt = _get_available_margin_usdt(binance_client)
+                    except Exception:
+                        available_balance_usdt = None
+
+                report_msg = _build_periodic_report_message(
+                    regime=last_detected_regime,
+                    operations=period_operations,
+                    net_pnl_usdt=period_net_pnl_usdt,
+                    available_balance_usdt=available_balance_usdt,
+                )
+                enviar_telegram(report_msg)
+
+                # Reinicio de métricas para el nuevo ciclo de 4 horas.
+                period_operations = []
+                period_net_pnl_usdt = 0.0
+
+                next_report_epoch_s = next_report_epoch_s + REPORT_INTERVAL_S
+                if next_report_epoch_s <= now_epoch_s:
+                    next_report_epoch_s = _align_next_report_epoch_seconds(now_epoch_s, REPORT_INTERVAL_S)
+                print("[REPORT] Enviado resumen periódico 4h.", flush=True)
+
             print("[LIVE] Revisando mercado real...", flush=True)
 
             df_live = download_btc_ohlcv(lookback_days=args.lookback_days, interval=args.interval)
             if df_live.empty:
-                time.sleep(60)
+                _sleep_with_report(60)
                 continue
 
             for c in ["open", "high", "low", "close"]:
@@ -962,13 +1000,13 @@ def main() -> None:
 
             df_ind = prepare_indicators(df_live, cfg)
             if df_ind.empty:
-                time.sleep(60)
+                _sleep_with_report(60)
                 continue
 
             last = df_ind.iloc[-1]
             current_ts = last["date"]
             if last_processed_ts is not None and current_ts == last_processed_ts:
-                time.sleep(60)
+                _sleep_with_report(60)
                 continue
             last_processed_ts = current_ts
 
@@ -1002,7 +1040,7 @@ def main() -> None:
             last_detected_regime = regime
 
             if binance_client is None:
-                time.sleep(60)
+                _sleep_with_report(60)
                 continue
 
             assert step_size is not None and tick_size is not None
@@ -1178,7 +1216,8 @@ def main() -> None:
         except Exception as e:
             print(f"[LIVE] Error en el bucle: {e}", flush=True)
 
-        time.sleep(60)
+        # Evitamos saltarnos el próximo reporte.
+        _sleep_with_report(60)
 
 
 if __name__ == "__main__":
