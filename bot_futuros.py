@@ -26,6 +26,8 @@ Notas para principiantes:
 
 from __future__ import annotations
 
+from binance import Client  # type: ignore
+
 import argparse
 import os
 import math
@@ -36,8 +38,6 @@ from typing import List, Optional
 import pandas as pd
 import time
 from decimal import Decimal, ROUND_DOWN
-
-from binance import Client  # type: ignore
 
 
 def enviar_telegram(mensaje: str) -> None:
