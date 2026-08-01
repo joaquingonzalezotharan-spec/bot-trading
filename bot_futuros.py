@@ -536,31 +536,21 @@ def get_binance_futures_client() -> Optional["Client"]:
     if not api_key or not api_secret:
         return None
 
-    proxy_url = os.environ.get("PROXY_URL")
+    # Proxy residencial (Render) con credenciales
+    proxy_ip = os.environ.get("PROXY_IP")
+    proxy_user = os.environ.get("PROXY_USER")
+    proxy_password = os.environ.get("PROXY_PASSWORD")
+
+    proxy_url = None
     requests_params = None
-    if proxy_url:
-        # Si PROXY_URL viene sin puerto (ej: "http://ip" o "ip"), requests caerá a puerto 80.
-        # Corregimos agregando el puerto residencial esperado.
-        from urllib.parse import urlparse
 
-        proxy_port = os.environ.get("PROXY_PORT", "50100")
+    if proxy_ip and proxy_user and proxy_password:
+        # En caso de caracteres especiales en user/pass, los codificamos para que el URL sea válido.
+        from urllib.parse import quote
 
-        # Aseguramos que tenga esquema para urlparse.
-        if "://" not in proxy_url:
-            proxy_url = f"http://{proxy_url}"
-
-        parsed = urlparse(proxy_url)
-        if parsed.port is None and parsed.hostname:
-            scheme = parsed.scheme or "http"
-
-            userinfo = ""
-            if parsed.username:
-                userinfo = parsed.username
-                if parsed.password:
-                    userinfo += f":{parsed.password}"
-                userinfo += "@"
-
-            proxy_url = f"{scheme}://{userinfo}{parsed.hostname}:{proxy_port}"
+        proxy_user_enc = quote(proxy_user, safe="")
+        proxy_pass_enc = quote(proxy_password, safe="")
+        proxy_url = f"http://{proxy_user_enc}:{proxy_pass_enc}@{proxy_ip}:50100"
 
         proxies = {"http": proxy_url, "https": proxy_url}
         requests_params = {"proxies": proxies}
