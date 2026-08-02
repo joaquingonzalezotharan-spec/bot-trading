@@ -1037,6 +1037,17 @@ def main() -> None:
             else:
                 print("[LIVE] Régimen Detectado: MERCADO LATERAL (Rango)", flush=True)
 
+            last_rsi = float(last["rsi"])
+            last_bb_lower = float(last["bb_lower"])
+            last_bb_cross_below_lower = bool(last["bb_cross_below_lower"])
+            last_long_entry_lateral = bool(last["long_entry_lateral"])
+            last_long_entry_bullish = bool(last["long_entry_bullish"])
+
+            print(
+                f"[DIAGÓSTICO] Régimen: {regime} | Close: {last_close} | RSI: {last_rsi:.2f} | BB_Lower: {last_bb_lower:.2f} | ¿Cruce_Lower?: {last_bb_cross_below_lower} | ¿Entry_Lateral?: {last_long_entry_lateral} | ¿Entry_Bullish?: {last_long_entry_bullish}",
+                flush=True,
+            )
+
             last_detected_regime = regime
 
             if binance_client is None:
