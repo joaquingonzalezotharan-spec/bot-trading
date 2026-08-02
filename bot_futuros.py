@@ -10,10 +10,10 @@ Bot educativo para BTCUSDT (Binance Futuros USDT-M) con 3 estrategias según el 
 Incluye:
 - Detector automático de régimen (LATERAL/ALCISTA/BAJISTA) dentro de `main()`.
 - Órdenes con SL/TP y redondeo a `stepSize`/`tickSize`.
-- fixed_quantity = 0.0015 usando `_round_up_to_step()` para evitar quedarnos por debajo del mínimo.
+- Sizing basado en riesgo (risk fraction) y apalancamiento `cfg.leverage`.
 
 Descarga de datos:
-- Usa yfinance (ticker: BTC-USD).
+- Candles históricos desde Binance Futures vía `futures_klines`.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ import argparse
 import os
 import math
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import List, Optional
 
 import pandas as pd
@@ -132,8 +132,9 @@ class StrategyConfig:
     bb_std_mult: float = 2.0
     ema_length: int = 200
 
-    # Trading fijo (para evitar rechazos por quantity mínima)
-    fixed_quantity: float = 0.0015
+    # Fracción del margen disponible a usar por trade (en USDT).
+    # Ej: 0.10 => 10% del margen disponible (antes de convertir con leverage).
+    risk_fraction: float = 0.10
 
     # Apalancamiento (configurado en Binance al iniciar)
     leverage: int = 5
@@ -160,91 +161,102 @@ class StrategyConfig:
 # -----------------------------
 # Descarga de datos (OHLCV)
 # -----------------------------
-def download_btc_ohlcv(
+def _interval_to_seconds(interval: str) -> int:
+    """
+    Convierte un intervalo Binance (ej: '5m', '1h', '1d') a segundos.
+    """
+    s = interval.strip().lower()
+    if not s:
+        return 300
+    unit = s[-1]
+    try:
+        n = int(s[:-1])
+    except ValueError:
+        return 300
+
+    if unit == "m":
+        return n * 60
+    if unit == "h":
+        return n * 3600
+    if unit == "d":
+        return n * 86400
+    return 300
+
+
+def fetch_binance_futures_candles(
+    client: "Client",
+    *,
+    symbol: str,
     lookback_days: int,
     interval: str,
 ) -> pd.DataFrame:
     """
-    Descarga OHLCV de BTC.
+    Fetch histórico vía Binance Futures `futures_klines`.
 
-    Usa únicamente yfinance (BTC-USD) y retorna columnas:
-    open/high/low/close (y volume si está disponible).
+    Retorna DataFrame con columnas:
+    - date: open time como `pd.Timestamp` UTC
+    - open/high/low/close/volume
     """
+    interval_seconds = _interval_to_seconds(interval)
+    interval_ms = int(interval_seconds * 1000)
+
     end_dt = datetime.now(timezone.utc)
-    start_dt = end_dt - timedelta(days=lookback_days)
+    end_ms = int(end_dt.timestamp() * 1000)
+    start_ms = end_ms - int(lookback_days * 86400 * 1000)
 
-    return _download_with_yfinance(start_dt, end_dt, interval)
+    # Alineamos al "grid" del intervalo para que las velas coincidan mejor.
+    if interval_ms > 0:
+        start_ms = start_ms - (start_ms % interval_ms)
 
+    klines: list[list] = []
+    cursor_ms = int(start_ms)
+    # Evitamos hacer suposiciones de límites; pero para lookbacks típicos
+    # (2-10 días) 1000-1500 candelas suelen bastar por request.
+    limit_per_call = 1000
+    safety_iter = 0
+    while cursor_ms < end_ms and safety_iter < 50:
+        safety_iter += 1
+        chunk = client.futures_klines(
+            symbol=symbol,
+            interval=interval,
+            startTime=cursor_ms,
+            endTime=end_ms,
+            limit=limit_per_call,
+        )
+        if not chunk:
+            break
+        klines.extend(chunk)
 
-def _download_with_yfinance(
-    start_dt: datetime,
-    end_dt: datetime,
-    interval: str,
-) -> pd.DataFrame:
-    """
-    Descarga con yfinance.
+        last_open_time_ms = int(chunk[-1][0])
+        # Avanzamos a la siguiente vela (open time + intervalo).
+        cursor_ms = last_open_time_ms + interval_ms
 
-    Importante:
-    - yfinance no suele tener "BTC/USDT" como símbolo exacto.
-    - Usamos BTC-USD (fuente gratuita de Yahoo Finance).
-    """
-    try:
-        import yfinance as yf
-    except ImportError as e:
-        raise ImportError(
-            "Falta la dependencia 'yfinance'. Instálala con: pip install yfinance"
-        ) from e
+        # Si devolvió menos del máximo, presumimos que ya no hay más.
+        if len(chunk) < limit_per_call:
+            break
 
-    df = yf.download(
-        "BTC-USD",
-        start=start_dt.strftime("%Y-%m-%d"),
-        end=end_dt.strftime("%Y-%m-%d"),
-        interval=interval,
-        progress=False,
-        auto_adjust=False,
-    )
+    columns = ["date", "open", "high", "low", "close", "volume"]
+    if not klines:
+        return pd.DataFrame(columns=columns)
 
-    if df.empty:
-        # No lanzamos RuntimeError por pedido del usuario.
-        # Devolvemos un DataFrame vacío con el formato esperado.
-        return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
+    rows = []
+    for k in klines:
+        # k: [openTime, open, high, low, close, volume, closeTime, ...]
+        open_time_ms = int(k[0])
+        rows.append(
+            [
+                pd.to_datetime(open_time_ms, unit="ms", utc=True),
+                float(k[1]),
+                float(k[2]),
+                float(k[3]),
+                float(k[4]),
+                float(k[5]),
+            ]
+        )
 
-    # Limpieza robusta del formato de Yahoo Finance.
-    # Ejecuta la normalización exactamente después de descargar.
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    df.columns = df.columns.str.lower()
-
-    # Aseguramos que existan columnas esperadas.
-    # (Yahoo a veces usa "adj close"; si no hay "close", lo copiamos.)
-    if "close" not in df.columns and "adj close" in df.columns:
-        df["close"] = df["adj close"]
-    if "volume" not in df.columns:
-        # Si no viene volumen, la estrategia no lo necesita estrictamente, pero
-        # aquí lo creamos para que el filtrado df[['open',...,'volume']] no falle.
-        df["volume"] = 0.0
-
-    # Si por algún motivo faltara open/high/low/close, intentamos con alternativas comunes.
-    if "open" not in df.columns and "o" in df.columns:
-        df["open"] = df["o"]
-    if "high" not in df.columns and "h" in df.columns:
-        df["high"] = df["h"]
-    if "low" not in df.columns and "l" in df.columns:
-        df["low"] = df["l"]
-
-    # Filtramos columnas esperadas (sin lanzar RuntimeError).
-    keep_cols = ["open", "high", "low", "close", "volume"]
-    for c in keep_cols:
-        if c not in df.columns:
-            # Creamos columnas faltantes como NaN para evitar errores de selección.
-            df[c] = float("nan")
-
-    df = df[keep_cols].copy()
-
-    df = df.sort_index().copy()
-    df["date"] = df.index
-    df = df.reset_index(drop=True)
-    return df[["date", "open", "high", "low", "close", "volume"]].copy()
+    df = pd.DataFrame(rows, columns=columns)
+    df = df.drop_duplicates(subset=["date"]).sort_values("date").reset_index(drop=True)
+    return df
 
 
 # -----------------------------
@@ -726,6 +738,54 @@ def _get_available_margin_usdt(client: "Client") -> float:
     return float(account.get("totalWalletBalance", 0.0))
 
 
+def _compute_quantity_from_risk(
+    *,
+    available_margin_usdt: float,
+    cfg: StrategyConfig,
+    entry_price: float,
+    step_size: float,
+) -> float:
+    """
+    Convierte margen disponible -> cantidad (qty) según cfg.risk_fraction y cfg.leverage.
+    """
+    if available_margin_usdt <= 0:
+        return 0.0
+    if entry_price <= 0:
+        return 0.0
+
+    risk_budget_usdt = float(available_margin_usdt) * float(cfg.risk_fraction)
+    if risk_budget_usdt <= 0:
+        return 0.0
+
+    # notional ≈ margin * leverage
+    desired_qty = (risk_budget_usdt * float(cfg.leverage)) / float(entry_price)
+    qty_up = _round_up_to_step(desired_qty, step_size)
+    if qty_up <= 0:
+        return 0.0
+
+    margin_used_up = (qty_up * float(entry_price)) / float(cfg.leverage)
+    if margin_used_up <= risk_budget_usdt + 1e-9:
+        return qty_up
+
+    # Si el redondeo excede el presupuesto, bajamos.
+    qty_down = _round_down_to_step(desired_qty, step_size)
+    if qty_down <= 0:
+        return 0.0
+
+    margin_used_down = (qty_down * float(entry_price)) / float(cfg.leverage)
+    if margin_used_down <= risk_budget_usdt + 1e-9:
+        return qty_down
+
+    # Safety: ajustar un paso adicional si aún excede por errores numéricos.
+    qty = qty_down
+    while qty > 0:
+        margin_used = (qty * float(entry_price)) / float(cfg.leverage)
+        if margin_used <= risk_budget_usdt + 1e-9:
+            return qty
+        qty = _round_down_to_step(qty - step_size, step_size)
+    return 0.0
+
+
 def _get_open_position_amt(client: "Client", symbol: str) -> float:
     """
     Devuelve positionAmt (positivo = LONG).
@@ -747,21 +807,19 @@ def _cancel_all_open_orders(client: "Client", symbol: str) -> None:
 def _place_long_with_stop(
     client: "Client",
     symbol: str,
-    cfg: StrategyConfig,
-    step_size: float,
     tick_size: float,
     entry_price: float,
     sl_pct: float,
     tp_pct: float,
+    quantity: float,
 ) -> None:
     """
     Abre una posición LONG MARKET y crea órdenes:
     - STOP_MARKET (Stop Loss) a entry*(1 - sl_pct)
     - TAKE_PROFIT_MARKET (Take Profit) a entry*(1 + tp_pct)
     """
-    quantity = _round_up_to_step(cfg.fixed_quantity, step_size)
     if quantity <= 0:
-        raise RuntimeError("Cantidad calculada inválida (<= 0).")
+        raise RuntimeError("Cantidad inválida (<= 0).")
 
     client.futures_create_order(
         symbol=symbol,
@@ -825,21 +883,19 @@ def _close_long_market(
 def _place_short_with_sl_tp(
     client: "Client",
     symbol: str,
-    cfg: StrategyConfig,
-    step_size: float,
     tick_size: float,
     entry_price: float,
     sl_pct: float,
     tp_pct: float,
+    quantity: float,
 ) -> None:
     """
     Abre una posición SHORT MARKET y crea órdenes:
     - STOP_MARKET (Stop Loss) a entry*(1 + sl_pct)
     - TAKE_PROFIT_MARKET (Take Profit) a entry*(1 - tp_pct)
     """
-    quantity = _round_up_to_step(cfg.fixed_quantity, step_size)
     if quantity <= 0:
-        raise RuntimeError("Cantidad calculada inválida (<= 0).")
+        raise RuntimeError("Cantidad inválida (<= 0).")
 
     # Entrada SHORT
     client.futures_create_order(
@@ -927,7 +983,7 @@ def _close_short_market(
 # -----------------------------
 def main() -> None:
     parser = argparse.ArgumentParser(description="Bot Futuros BTC con 3 regímenes: Lateral/Alcista/Bajista (Long/Short).")
-    parser.add_argument("--lookback-days", type=int, default=2, help="Días hacia atrás para descargar datos con yfinance.")
+    parser.add_argument("--lookback-days", type=int, default=2, help="Días hacia atrás para descargar datos desde Binance.")
     parser.add_argument("--interval", type=str, default="5m", help="Intervalo (por defecto: 5m).")
     parser.add_argument("--symbol", type=str, default="BTCUSDT", help="Símbolo Binance USDT-M (ej: BTCUSDT).")
     args = parser.parse_args()
@@ -950,7 +1006,19 @@ def main() -> None:
         step_size, tick_size = _get_futures_symbol_filters(binance_client, args.symbol)
         print(f"[LIVE] Filtros Binance: step_size={step_size} | tick_size={tick_size}", flush=True)
 
-    enviar_telegram(f"[BOT INICIADO] symbol={args.symbol} | interval={args.interval} | leverage={cfg.leverage}x | fixed_quantity={cfg.fixed_quantity}")
+        # Asegura modo ISOLATED margin type (si falla porque ya está aislado, lo ignoramos).
+        try:
+            binance_client.futures_change_margin_type(symbol=args.symbol, marginType="ISOLATED")
+        except Exception as e:
+            msg = str(e).lower()
+            if "isolated" in msg or "margin type" in msg or "no need" in msg or "already" in msg:
+                pass
+            else:
+                print(f"[LIVE] No pude cambiar marginType a ISOLATED ({e}). Continuo.", flush=True)
+
+    enviar_telegram(
+        f"[BOT INICIADO] symbol={args.symbol} | interval={args.interval} | leverage={cfg.leverage}x | risk_fraction={cfg.risk_fraction}"
+    )
 
     last_processed_ts: Optional[pd.Timestamp] = None
     in_long_state = False
@@ -961,7 +1029,7 @@ def main() -> None:
     regime_lookback = 10
     cross_window = 6
 
-    # Alineamos descargas/decisiones a cierres de vela para reducir requests a yfinance.
+    # Alineamos descargas/decisiones a cierres de vela para reducir requests.
     tf_seconds = 300.0
     if args.interval.endswith("m"):
         try:
@@ -1006,7 +1074,7 @@ def main() -> None:
         """
         now = time.time()
         next_candle_epoch_s = (math.floor(now / tf_seconds) + 1) * tf_seconds
-        sleep_s = max(0.0, next_candle_epoch_s - now + 1.0)  # margen para que yfinance tenga la vela lista
+        sleep_s = max(0.0, next_candle_epoch_s - now + 1.0)  # margen para que Binance tenga la vela lista
 
         remaining_to_report = next_report_epoch_s - now
         if remaining_to_report <= 0:
@@ -1048,18 +1116,24 @@ def main() -> None:
                 print("[REPORT] Enviado resumen periódico 4h.", flush=True)
 
             # Reducimos rate-limit alineando la descarga a cierres de vela.
+            if binance_client is None:
+                _sleep_with_report(60)
+                continue
+
             _sleep_until_next_candle()
             print("[LIVE] Revisando mercado real...", flush=True)
 
             try:
-                df_live = download_btc_ohlcv(lookback_days=args.lookback_days, interval=args.interval)
+                df_live = fetch_binance_futures_candles(
+                    binance_client,
+                    symbol=args.symbol,
+                    lookback_days=args.lookback_days,
+                    interval=args.interval,
+                )
             except Exception as e:
-                # yfinance suele lanzar YFRateLimitError con mensaje "Too Many Requests".
-                if e.__class__.__name__ == "YFRateLimitError" or "Too Many Requests" in str(e):
-                    print(f"[YF] Rate limit detectado. Dormimos y reintentamos: {e}", flush=True)
-                    _sleep_with_report(180)
-                    continue
-                raise
+                print(f"[BINANCE] Error descargando velas: {e}", flush=True)
+                _sleep_with_report(180)
+                continue
             if df_live.empty:
                 _sleep_with_report(60)
                 continue
@@ -1183,20 +1257,77 @@ def main() -> None:
             # Aperturas si no hay posición
             if (not in_long) and (not in_short):
                 if regime == "LATERAL" and long_entry_lateral:
-                    _place_long_with_stop(binance_client, args.symbol, cfg, step_size, tick_size, last_close, cfg.sl_lateral_pct, cfg.tp_lateral_pct)
-                    in_long_state = True
-                    entry_price_state = last_close
-                    entry_quantity_state = _round_up_to_step(cfg.fixed_quantity, step_size)
+                    assert step_size is not None
+                    available_margin_usdt = _get_available_margin_usdt(binance_client)
+                    quantity = _compute_quantity_from_risk(
+                        available_margin_usdt=available_margin_usdt,
+                        cfg=cfg,
+                        entry_price=last_close,
+                        step_size=step_size,
+                    )
+                    if quantity <= 0:
+                        print("[LIVE] Qty calculada <= 0. Saltando apertura LONG.", flush=True)
+                    else:
+                        _place_long_with_stop(
+                            binance_client,
+                            args.symbol,
+                            tick_size,
+                            last_close,
+                            cfg.sl_lateral_pct,
+                            cfg.tp_lateral_pct,
+                            quantity,
+                        )
+                        in_long_state = True
+                        entry_price_state = last_close
+                        entry_quantity_state = quantity
                 elif regime == "ALCISTA" and long_entry_bullish:
-                    _place_long_with_stop(binance_client, args.symbol, cfg, step_size, tick_size, last_close, cfg.sl_bullish_pct, cfg.tp_bullish_pct)
-                    in_long_state = True
-                    entry_price_state = last_close
-                    entry_quantity_state = _round_up_to_step(cfg.fixed_quantity, step_size)
+                    assert step_size is not None
+                    available_margin_usdt = _get_available_margin_usdt(binance_client)
+                    quantity = _compute_quantity_from_risk(
+                        available_margin_usdt=available_margin_usdt,
+                        cfg=cfg,
+                        entry_price=last_close,
+                        step_size=step_size,
+                    )
+                    if quantity <= 0:
+                        print("[LIVE] Qty calculada <= 0. Saltando apertura LONG.", flush=True)
+                    else:
+                        _place_long_with_stop(
+                            binance_client,
+                            args.symbol,
+                            tick_size,
+                            last_close,
+                            cfg.sl_bullish_pct,
+                            cfg.tp_bullish_pct,
+                            quantity,
+                        )
+                        in_long_state = True
+                        entry_price_state = last_close
+                        entry_quantity_state = quantity
                 elif regime == "BAJISTA" and short_entry_bearish:
-                    _place_short_with_sl_tp(binance_client, args.symbol, cfg, step_size, tick_size, last_close, cfg.sl_bearish_pct, cfg.tp_bearish_pct)
-                    in_short_state = True
-                    entry_price_state = last_close
-                    entry_quantity_state = _round_up_to_step(cfg.fixed_quantity, step_size)
+                    assert step_size is not None
+                    available_margin_usdt = _get_available_margin_usdt(binance_client)
+                    quantity = _compute_quantity_from_risk(
+                        available_margin_usdt=available_margin_usdt,
+                        cfg=cfg,
+                        entry_price=last_close,
+                        step_size=step_size,
+                    )
+                    if quantity <= 0:
+                        print("[LIVE] Qty calculada <= 0. Saltando apertura SHORT.", flush=True)
+                    else:
+                        _place_short_with_sl_tp(
+                            binance_client,
+                            args.symbol,
+                            tick_size,
+                            last_close,
+                            cfg.sl_bearish_pct,
+                            cfg.tp_bearish_pct,
+                            quantity,
+                        )
+                        in_short_state = True
+                        entry_price_state = last_close
+                        entry_quantity_state = quantity
 
             # Cierres manuales por señal
             else:
