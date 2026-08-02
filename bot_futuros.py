@@ -150,7 +150,8 @@ class StrategyConfig:
     tp_bullish_pct: float = 0.0100   # +1.00%
 
     # Bajista (Down / Short)
-    bearish_rsi_entry: float = 65.0
+    # (Live) más flexible para que el modo BAJISTA pueda disparar antes.
+    bearish_rsi_entry: float = 55.0
     bearish_rsi_exit: float = 35.0
     sl_bearish_pct: float = 0.0040   # +0.40% (SL arriba para Short)
     tp_bearish_pct: float = 0.0080   # -0.80% (TP abajo para Short)
@@ -939,6 +940,26 @@ def main() -> None:
     regime_lookback = 10
     cross_window = 6
 
+    # Alineamos descargas/decisiones a cierres de vela para reducir requests a yfinance.
+    tf_seconds = 300.0
+    if args.interval.endswith("m"):
+        try:
+            tf_seconds = float(int(args.interval[:-1]) * 60)
+        except ValueError:
+            tf_seconds = 300.0
+    elif args.interval.endswith("h"):
+        try:
+            tf_seconds = float(int(args.interval[:-1]) * 3600)
+        except ValueError:
+            tf_seconds = 300.0
+    elif args.interval.endswith("d"):
+        try:
+            tf_seconds = float(int(args.interval[:-1]) * 86400)
+        except ValueError:
+            tf_seconds = 300.0
+    if tf_seconds <= 0:
+        tf_seconds = 300.0
+
     print("[LIVE] Bot activo: detectando régimen y operando con BB+RSI+EMA200...", flush=True)
 
     # Métricas de la ventana actual de 4 horas (reiniciadas tras cada reporte).
@@ -956,6 +977,24 @@ def main() -> None:
         if remaining <= 0:
             return
         time.sleep(min(float(max_sleep_s), float(remaining)))
+
+    def _sleep_until_next_candle() -> None:
+        """
+        Duerme hasta el siguiente cierre de vela según `tf_seconds`,
+        sin retrasar el próximo reporte periódico (4h).
+        """
+        now = time.time()
+        next_candle_epoch_s = (math.floor(now / tf_seconds) + 1) * tf_seconds
+        sleep_s = max(0.0, next_candle_epoch_s - now + 1.0)  # margen para que yfinance tenga la vela lista
+
+        remaining_to_report = next_report_epoch_s - now
+        if remaining_to_report <= 0:
+            return
+
+        # No dormir más que lo que falta para el reporte 4h.
+        sleep_s = min(sleep_s, remaining_to_report)
+        if sleep_s > 0:
+            time.sleep(sleep_s)
 
     while True:
         try:
@@ -987,9 +1026,19 @@ def main() -> None:
                     next_report_epoch_s = _align_next_report_epoch_seconds(now_epoch_s, REPORT_INTERVAL_S)
                 print("[REPORT] Enviado resumen periódico 4h.", flush=True)
 
+            # Reducimos rate-limit alineando la descarga a cierres de vela.
+            _sleep_until_next_candle()
             print("[LIVE] Revisando mercado real...", flush=True)
 
-            df_live = download_btc_ohlcv(lookback_days=args.lookback_days, interval=args.interval)
+            try:
+                df_live = download_btc_ohlcv(lookback_days=args.lookback_days, interval=args.interval)
+            except Exception as e:
+                # yfinance suele lanzar YFRateLimitError con mensaje "Too Many Requests".
+                if e.__class__.__name__ == "YFRateLimitError" or "Too Many Requests" in str(e):
+                    print(f"[YF] Rate limit detectado. Dormimos y reintentamos: {e}", flush=True)
+                    _sleep_with_report(180)
+                    continue
+                raise
             if df_live.empty:
                 _sleep_with_report(60)
                 continue
