@@ -849,7 +849,21 @@ def _place_short_with_sl_tp(
         quantity=quantity,
     )
 
+    # Usamos el precio actual (marca/último) para evitar que Binance rechace
+    # las órdenes condicionales con: "Order would immediately trigger".
+    current_price = float(entry_price)
+    try:
+        ticker = client.futures_symbol_ticker(symbol=symbol)
+        if ticker and "price" in ticker:
+            current_price = float(ticker["price"])
+    except Exception:
+        pass
+
     stop_price = _round_down_to_tick(entry_price * (1.0 + sl_pct), tick_size)
+    # Para STOP_MARKET BUY en SHORT, el stop debe quedar por ENCIMA del precio actual.
+    if stop_price <= current_price:
+        stop_price = _round_down_to_tick(current_price + 2.0 * tick_size, tick_size)
+
     client.futures_create_order(
         symbol=symbol,
         side="BUY",
@@ -860,10 +874,17 @@ def _place_short_with_sl_tp(
     )
 
     take_profit_price = _round_down_to_tick(entry_price * (1.0 - tp_pct), tick_size)
+    # Para un TP en SHORT (cierre con BUY cuando cae el precio), evitamos que quede
+    # por encima/igual al precio actual. Si ocurre, lo empujamos hacia abajo 2 ticks.
+    if take_profit_price >= current_price:
+        take_profit_price = _round_down_to_tick(current_price - 2.0 * tick_size, tick_size)
+
+    # Nota: en algunos casos Binance rechaza TAKE_PROFIT_MARKET inmediato.
+    # Usamos STOP_MARKET inverso para el TP del SHORT: side=BUY con stopPrice por debajo.
     client.futures_create_order(
         symbol=symbol,
         side="BUY",
-        type="TAKE_PROFIT_MARKET",
+        type="STOP_MARKET",
         quantity=quantity,
         stopPrice=take_profit_price,
         reduceOnly=True,
