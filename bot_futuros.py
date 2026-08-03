@@ -23,6 +23,7 @@ from binance import Client  # type: ignore
 import argparse
 import os
 import math
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -30,6 +31,13 @@ from typing import List, Optional
 import pandas as pd
 import time
 from decimal import Decimal, ROUND_DOWN, ROUND_UP
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 
 def enviar_telegram(mensaje: str) -> None:
@@ -142,6 +150,10 @@ class StrategyConfig:
     # Fracción del margen disponible a usar por trade (en USDT).
     # Ej: 0.10 => 10% del margen disponible (antes de convertir con leverage).
     risk_fraction: float = 0.10
+
+    # Límite estricto del margen máximo por operación (riesgo de capital).
+    # Ej: 0.05 => nunca usar más del 5% del balance total de la cuenta.
+    max_margin_per_trade_pct: float = 0.05
 
     # Apalancamiento (configurado en Binance al iniciar)
     leverage: int = 5
@@ -308,8 +320,9 @@ def prepare_indicators(df: pd.DataFrame, cfg: StrategyConfig) -> pd.DataFrame:
 
     out = out.dropna(subset=["rsi", "bb_upper", "bb_lower", "ema200"]).reset_index(drop=True)
 
-    # BB superior expandida (4σ): bb_middle + 4 * std  (como bb_upper ya es 2σ)
-    out["bb_upper_expanded"] = out["bb_middle"] + 2.0 * (out["bb_upper"] - out["bb_middle"])
+    # BB superior expandida (3σ): bb_middle + 1.5 * (distancia desde bb_middle a bb_upper)
+    # (porque bb_upper está a ~2σ; entonces 1.5 * (2σ) = 3σ)
+    out["bb_upper_expanded"] = out["bb_middle"] + 1.5 * (out["bb_upper"] - out["bb_middle"])
 
     # Cruce por debajo de la banda inferior (close cruza bajo BB inferior)
     prev_close = out["close"].shift(1)
@@ -328,7 +341,10 @@ def prepare_indicators(df: pd.DataFrame, cfg: StrategyConfig) -> pd.DataFrame:
     # El EMA200 se utiliza en el DETECTOR de régimen, pero NO como filtro de la señal
     # en este modo (para que la entrada sea BB+RSI puro).
     out["long_entry_bullish"] = (out["low"] <= out["bb_middle"]) & (out["rsi"] <= cfg.bullish_rsi_entry)
-    out["long_exit_bullish"] = out["high"] >= out["bb_upper_expanded"]
+    # Salida ALCISTA optimizada:
+    # - si High toca la banda expandida de 3σ O
+    # - si RSI entra en zona de agotamiento (>=72.0)
+    out["long_exit_bullish"] = (out["high"] >= out["bb_upper_expanded"]) | (out["rsi"] >= 72.0)
 
     # BAJISTA (Down / Short)
     # Rebound hacia arriba: toca banda superior o línea media + RSI alto
@@ -336,7 +352,10 @@ def prepare_indicators(df: pd.DataFrame, cfg: StrategyConfig) -> pd.DataFrame:
         ((out["high"] >= out["bb_upper"]) | (out["high"] >= out["bb_middle"]))
         & (out["rsi"] >= cfg.bearish_rsi_entry)
     )
-    out["short_exit_bearish"] = (out["low"] <= out["bb_lower"]) | (out["rsi"] < cfg.bearish_rsi_exit)
+    # Salida BAJISTA optimizada:
+    # - si Low toca la banda inferior OR
+    # - escape por sobreventa extrema (RSI <= 28.0)
+    out["short_exit_bearish"] = (out["low"] <= out["bb_lower"]) | (out["rsi"] <= 28.0)
 
     return out
 
@@ -760,8 +779,31 @@ def _get_available_and_total_wallet_balance_usdt(client: "Client") -> tuple[Opti
     """
     Lee ambos saldos (disponible y total) desde futures_account().
     """
-    account = client.futures_account()
+    # Preferimos leer el "available" y "balance" SOLO para el asset "USDT".
+    try:
+        balances = client.futures_account_balance()
+        for bal in balances:
+            if str(bal.get("asset", "")).upper() != "USDT":
+                continue
 
+            available_balance_usdt: Optional[float] = None
+            for key in ("availableBalance", "available_balance", "withdrawAvailable"):
+                if key in bal and bal[key] is not None:
+                    available_balance_usdt = float(bal[key])
+                    break
+
+            total_wallet_balance_usdt: Optional[float] = None
+            for key in ("balance", "walletBalance", "totalWalletBalance", "total_wallet_balance"):
+                if key in bal and bal[key] is not None:
+                    total_wallet_balance_usdt = float(bal[key])
+                    break
+
+            return available_balance_usdt, total_wallet_balance_usdt
+    except Exception:
+        pass
+
+    # fallback (agregado)
+    account = client.futures_account()
     available_balance_usdt: Optional[float] = None
     for key in ("availableBalance", "available_balance"):
         if key in account and account[key] is not None:
@@ -779,6 +821,7 @@ def _compute_quantity_from_risk(
     *,
     symbol: str,
     available_margin_usdt: float,
+    total_wallet_balance_usdt: float,
     cfg: StrategyConfig,
     entry_price: float,
     step_size: float,
@@ -792,6 +835,11 @@ def _compute_quantity_from_risk(
         return 0.0
 
     risk_budget_usdt = float(available_margin_usdt) * float(cfg.risk_fraction)
+
+    # Cap estricto: nunca arriesgar más del cfg.max_margin_per_trade_pct del balance total.
+    cap_usdt = float(total_wallet_balance_usdt) * float(cfg.max_margin_per_trade_pct)
+    if cap_usdt > 0:
+        risk_budget_usdt = min(risk_budget_usdt, cap_usdt)
     if risk_budget_usdt <= 0:
         return 0.0
 
@@ -1378,10 +1426,15 @@ def main() -> None:
             if (not in_long) and (not in_short):
                 if regime == "LATERAL" and long_entry_lateral:
                     assert step_size is not None
-                    available_margin_usdt = _get_available_margin_usdt(binance_client)
+                    available_margin_usdt_opt, total_wallet_balance_usdt_opt = _get_available_and_total_wallet_balance_usdt(
+                        binance_client
+                    )
+                    available_margin_usdt = float(available_margin_usdt_opt or 0.0)
+                    total_wallet_balance_usdt = float(total_wallet_balance_usdt_opt or 0.0)
                     quantity = _compute_quantity_from_risk(
                         symbol=args.symbol,
                         available_margin_usdt=available_margin_usdt,
+                        total_wallet_balance_usdt=total_wallet_balance_usdt,
                         cfg=cfg,
                         entry_price=last_close,
                         step_size=step_size,
@@ -1404,10 +1457,15 @@ def main() -> None:
                         entry_quantity_state = quantity
                 elif regime == "ALCISTA" and long_entry_bullish:
                     assert step_size is not None
-                    available_margin_usdt = _get_available_margin_usdt(binance_client)
+                    available_margin_usdt_opt, total_wallet_balance_usdt_opt = _get_available_and_total_wallet_balance_usdt(
+                        binance_client
+                    )
+                    available_margin_usdt = float(available_margin_usdt_opt or 0.0)
+                    total_wallet_balance_usdt = float(total_wallet_balance_usdt_opt or 0.0)
                     quantity = _compute_quantity_from_risk(
                         symbol=args.symbol,
                         available_margin_usdt=available_margin_usdt,
+                        total_wallet_balance_usdt=total_wallet_balance_usdt,
                         cfg=cfg,
                         entry_price=last_close,
                         step_size=step_size,
@@ -1430,10 +1488,15 @@ def main() -> None:
                         entry_quantity_state = quantity
                 elif regime == "BAJISTA" and short_entry_bearish:
                     assert step_size is not None
-                    available_margin_usdt = _get_available_margin_usdt(binance_client)
+                    available_margin_usdt_opt, total_wallet_balance_usdt_opt = _get_available_and_total_wallet_balance_usdt(
+                        binance_client
+                    )
+                    available_margin_usdt = float(available_margin_usdt_opt or 0.0)
+                    total_wallet_balance_usdt = float(total_wallet_balance_usdt_opt or 0.0)
                     quantity = _compute_quantity_from_risk(
                         symbol=args.symbol,
                         available_margin_usdt=available_margin_usdt,
+                        total_wallet_balance_usdt=total_wallet_balance_usdt,
                         cfg=cfg,
                         entry_price=last_close,
                         step_size=step_size,
@@ -1479,27 +1542,38 @@ def main() -> None:
                         in_long_state = False
                         entry_price_state = None
                         entry_quantity_state = None
-                    elif regime == "ALCISTA" and long_exit_bullish:
-                        _close_long_market(binance_client, args.symbol, step_size=step_size)
-                        exit_price = last_close
-                        if entry_quantity_state is not None:
-                            pnl_usdt = _calc_pnl_usdt(
-                                is_long=True,
-                                entry_price=float(entry_price_state) if entry_price_state is not None else 0.0,
-                                exit_price=float(exit_price),
-                                quantity=float(entry_quantity_state),
+                    elif regime == "ALCISTA":
+                        # Trailing stop dinámico ultra-sensible:
+                        # cerrar si:
+                        # - High toca banda expandida (long_exit_bullish), O
+                        # - el cierre cae por debajo de la media móvil de BB (bb_middle)
+                        last_bb_middle = float(last["bb_middle"])
+                        if long_exit_bullish or (last_close < last_bb_middle):
+                            logger.info(
+                                "[A_MERCADO] Ejecutando cierre dinámico eficiente por pérdida de momentum en bb_middle"
                             )
-                            period_net_pnl_usdt += pnl_usdt
-                            now_utc = datetime.now(timezone.utc)
-                            period_operations.append(
-                                f"{now_utc.strftime('%H:%M UTC')} CLOSE LONG | entrada={entry_price_state:.2f} | salida={exit_price:.2f} | PnL={pnl_usdt:.2f} USDT"
+                            _close_long_market(binance_client, args.symbol, step_size=step_size)
+                            exit_price = last_close
+                            if entry_quantity_state is not None:
+                                pnl_usdt = _calc_pnl_usdt(
+                                    is_long=True,
+                                    entry_price=float(entry_price_state) if entry_price_state is not None else 0.0,
+                                    exit_price=float(exit_price),
+                                    quantity=float(entry_quantity_state),
+                                )
+                                period_net_pnl_usdt += pnl_usdt
+                                now_utc = datetime.now(timezone.utc)
+                                period_operations.append(
+                                    f"{now_utc.strftime('%H:%M UTC')} CLOSE LONG | entrada={entry_price_state:.2f} | salida={exit_price:.2f} | PnL={pnl_usdt:.2f} USDT"
+                                )
+                            pnl_pct = (exit_price - entry_price_state) / entry_price_state * 100.0
+                            signo = "GANANCIA" if pnl_pct >= 0 else "PERDIDA"
+                            enviar_telegram(
+                                f"[CLOSE LONG] {args.symbol} | entrada={entry_price_state:.2f} | salida={exit_price:.2f} | PnL={pnl_pct:.4f}% ({signo})"
                             )
-                        pnl_pct = (exit_price - entry_price_state) / entry_price_state * 100.0
-                        signo = "GANANCIA" if pnl_pct >= 0 else "PERDIDA"
-                        enviar_telegram(f"[CLOSE LONG] {args.symbol} | entrada={entry_price_state:.2f} | salida={exit_price:.2f} | PnL={pnl_pct:.4f}% ({signo})")
-                        in_long_state = False
-                        entry_price_state = None
-                        entry_quantity_state = None
+                            in_long_state = False
+                            entry_price_state = None
+                            entry_quantity_state = None
 
                 if in_short_state:
                     if regime == "BAJISTA" and short_exit_bearish:
