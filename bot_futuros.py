@@ -192,7 +192,8 @@ def main():
 
     # IMPORTANTE: aquí debes colocar el HOST/IP del proxy que te dio tu proveedor.
     # Ejemplo: proxy_host = "203.0.113.10" o "mi-proxy.midominio.com"
-    proxy_host = os.environ.get("PROXY_HOST") or "PON_AQUI_EL_HOST_O_IP_DEL_PROXY"
+    # IP/Host del servidor proxy (proveedor):
+    proxy_host = os.environ.get("PROXY_HOST") or "31.59.239.182"
 
     # Codificamos usuario/clave para que el URL sea válido.
     proxy_user_enc = quote(proxy_user, safe="")
