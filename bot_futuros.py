@@ -4,6 +4,7 @@ import argparse
 import logging
 import math
 import sys
+from urllib.parse import quote
 import pandas as pd
 import numpy as np
 from binance.client import Client
@@ -181,7 +182,25 @@ def main():
             "WARNING: Credenciales Binance no configuradas (BINANCE_API_KEY/BINANCE_API_SECRET). "
             "El bot continuará en modo no garantizado, pero no abortará el contenedor."
         )
-    client = Client(api_key or "", api_secret or "")
+    # -----------------------------
+    # PROXY (HTTP autenticado) para Binance Futures
+    # -----------------------------
+    # Usuario/contraseña del proveedor (los datos ya fueron provistos).
+    proxy_user = "joaquingonzalezotharan"
+    proxy_password = "JbADCjWM8g"
+    proxy_port = 50100
+
+    # IMPORTANTE: aquí debes colocar el HOST/IP del proxy que te dio tu proveedor.
+    # Ejemplo: proxy_host = "203.0.113.10" o "mi-proxy.midominio.com"
+    proxy_host = os.environ.get("PROXY_HOST") or "PON_AQUI_EL_HOST_O_IP_DEL_PROXY"
+
+    # Codificamos usuario/clave para que el URL sea válido.
+    proxy_user_enc = quote(proxy_user, safe="")
+    proxy_password_enc = quote(proxy_password, safe="")
+    proxy_url = f"http://{proxy_user_enc}:{proxy_password_enc}@{proxy_host}:{proxy_port}"
+    requests_params = {"proxies": {"http": proxy_url, "https": proxy_url}}
+
+    client = Client(api_key or "", api_secret or "", requests_params=requests_params)
     
     logger.info(f"=== Inicializando bot para {args.symbol} ===")
     
