@@ -166,8 +166,8 @@ class StrategyConfig:
 
     # Alcista (Up)
     bullish_rsi_entry: float = 65.0
-    sl_bullish_pct: float = 0.0040   # -0.40%
-    tp_bullish_pct: float = 0.0100   # +1.00%
+    tp_bullish_pct: float = 0.0050   # +0.50% Take Profit
+    sl_bullish_pct: float = 0.0025   # -0.25% Stop Loss (ratio 2:1)
 
     # Bajista (Down / Short)
     # (Live) más flexible para que el modo BAJISTA pueda disparar antes.
@@ -981,9 +981,10 @@ def _place_long_with_stop(
     client.futures_create_order(
         symbol=symbol,
         side="SELL",
-        type="TAKE_PROFIT_MARKET",
+        type="LIMIT",
+        price=take_profit_price,
         quantity=quantity,
-        stopPrice=take_profit_price,
+        timeInForce="GTC",
         reduceOnly=True,
     )
 
@@ -1103,9 +1104,10 @@ def _place_short_with_sl_tp(
     client.futures_create_order(
         symbol=symbol,
         side="BUY",
-        type="STOP_MARKET",
+        type="LIMIT",
+        price=take_profit_price,
         quantity=quantity,
-        stopPrice=take_profit_price,
+        timeInForce="GTC",
         reduceOnly=True,
     )
 
@@ -1171,6 +1173,11 @@ def main() -> None:
 
         # Asegura modo ISOLATED margin type (si falla porque ya está aislado, lo ignoramos).
         try:
+            try:
+                logger.info("[STARTUP] Purgando órdenes huérfanas en Binance...")
+                binance_client.futures_cancel_all_open_orders(symbol="BTCUSDT")
+            except Exception as e:
+                logger.warning(f"No se pudieron limpiar órdenes previas: {e}")
             binance_client.futures_change_margin_type(symbol=args.symbol, marginType="ISOLATED")
         except Exception as e:
             msg = str(e).lower()
