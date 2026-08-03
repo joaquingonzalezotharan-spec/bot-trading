@@ -736,12 +736,23 @@ def _get_available_margin_usdt(client: "Client") -> float:
     """
     Lee el margen disponible en USDT desde futures_account().
     """
+    # Preferimos leer el balance disponible del asset EXACTO "USDT" para
+    # evitar que el bot tome otra moneda o un agregado no deseado.
+    try:
+        balances = client.futures_account_balance()
+        for bal in balances:
+            if str(bal.get("asset", "")).upper() == "USDT":
+                for key in ("availableBalance", "available_balance", "withdrawAvailable"):
+                    if key in bal and bal[key] is not None:
+                        return float(bal[key])
+    except Exception:
+        pass
+
+    # Fallback: agregado desde futures_account()
     account = client.futures_account()
-    # En binance, suele existir "availableBalance"
     for key in ("availableBalance", "available_balance"):
         if key in account and account[key] is not None:
             return float(account[key])
-    # fallback
     return float(account.get("totalWalletBalance", 0.0))
 
 
@@ -766,6 +777,7 @@ def _get_available_and_total_wallet_balance_usdt(client: "Client") -> tuple[Opti
 
 def _compute_quantity_from_risk(
     *,
+    symbol: str,
     available_margin_usdt: float,
     cfg: StrategyConfig,
     entry_price: float,
@@ -787,20 +799,23 @@ def _compute_quantity_from_risk(
     desired_qty = (risk_budget_usdt * float(cfg.leverage)) / float(entry_price)
     qty_up = _round_up_to_step(desired_qty, step_size)
     if qty_up <= 0:
-        return 0.0
+        qty_up = 0.0
 
     margin_used_up = (qty_up * float(entry_price)) / float(cfg.leverage)
     if margin_used_up <= risk_budget_usdt + 1e-9:
-        return qty_up
+        # Si por redondeo quedara bajo el mínimo, aplicamos "min_qty" más abajo.
+        if qty_up > 0:
+            return qty_up
 
     # Si el redondeo excede el presupuesto, bajamos.
     qty_down = _round_down_to_step(desired_qty, step_size)
     if qty_down <= 0:
-        return 0.0
+        qty_down = 0.0
 
     margin_used_down = (qty_down * float(entry_price)) / float(cfg.leverage)
     if margin_used_down <= risk_budget_usdt + 1e-9:
-        return qty_down
+        if qty_down > 0:
+            return qty_down
 
     # Safety: ajustar un paso adicional si aún excede por errores numéricos.
     qty = qty_down
@@ -809,6 +824,23 @@ def _compute_quantity_from_risk(
         if margin_used <= risk_budget_usdt + 1e-9:
             return qty
         qty = _round_down_to_step(qty - step_size, step_size)
+
+    # Si llegamos acá, el redondeo/porcentaje dejó qty en 0 o no encontró un valor
+    # que respete el presupuesto con step_size. Forzamos un mínimo para BTC:
+    # mínimo pedido: 0.001 BTC (respetando step_size).
+    min_qty = step_size
+    sym = str(symbol).upper()
+    if sym.endswith("BTCUSDT") or sym.endswith("BTCUSD"):
+        min_qty = max(min_qty, 0.001)
+
+    forced_qty = _round_up_to_step(min_qty, step_size)
+    if forced_qty <= 0:
+        return 0.0
+
+    margin_used_forced = (forced_qty * float(entry_price)) / float(cfg.leverage)
+    if margin_used_forced <= risk_budget_usdt + 1e-9 and margin_used_forced <= float(available_margin_usdt) + 1e-9:
+        return forced_qty
+
     return 0.0
 
 
@@ -1340,6 +1372,7 @@ def main() -> None:
                     assert step_size is not None
                     available_margin_usdt = _get_available_margin_usdt(binance_client)
                     quantity = _compute_quantity_from_risk(
+                        symbol=args.symbol,
                         available_margin_usdt=available_margin_usdt,
                         cfg=cfg,
                         entry_price=last_close,
@@ -1365,6 +1398,7 @@ def main() -> None:
                     assert step_size is not None
                     available_margin_usdt = _get_available_margin_usdt(binance_client)
                     quantity = _compute_quantity_from_risk(
+                        symbol=args.symbol,
                         available_margin_usdt=available_margin_usdt,
                         cfg=cfg,
                         entry_price=last_close,
@@ -1390,6 +1424,7 @@ def main() -> None:
                     assert step_size is not None
                     available_margin_usdt = _get_available_margin_usdt(binance_client)
                     quantity = _compute_quantity_from_risk(
+                        symbol=args.symbol,
                         available_margin_usdt=available_margin_usdt,
                         cfg=cfg,
                         entry_price=last_close,
