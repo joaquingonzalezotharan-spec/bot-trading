@@ -197,19 +197,13 @@ def main():
     try:
         logger.info(f"[STARTUP] Ajustando Margin Type a ISOLATED y Leverage a {cfg.leverage}x...")
 
-        # Pre-cancel: si hay órdenes abiertas residuales, el cambio de marginType
-        # puede fallar con APIError (-4067). Cancelamos antes de intentar.
         try:
+            # Bloque completo dentro del mismo try para que cualquier APIError no se escape.
             logger.info(
                 f"[STARTUP] Cancelando órdenes abiertas antes de marginType ISOLATED ({args.symbol})..."
             )
             client.futures_cancel_all_open_orders(symbol=args.symbol)
-        except Exception as e:
-            logger.warning(
-                f"[STARTUP] No se pudieron limpiar órdenes previas antes de ISOLATED: {e}"
-            )
 
-        try:
             client.futures_change_margin_type(symbol=args.symbol, marginType="ISOLATED")
             client.futures_change_leverage(symbol=args.symbol, leverage=cfg.leverage)
         except BinanceAPIException as e:
@@ -217,13 +211,31 @@ def main():
                 "WARNING: No se pudo cambiar el margen o apalancamiento, saltando configuración..."
             )
             logger.warning(f"Detalle BinanceAPIException: {e}", exc_info=True)
+
+            # Diagnóstico read-only para saber si la API key sirve para lecturas.
+            try:
+                diag_price = client.futures_symbol_ticker(symbol=args.symbol).get("price")
+                diag_balances = client.futures_account_balance()
+                diag_usdt = None
+                for bal in diag_balances:
+                    if str(bal.get("asset", "")).upper() == "USDT":
+                        diag_usdt = bal.get("availableBalance") or bal.get("available_balance")
+                        break
+                logger.warning(
+                    f"[DIAG] ticker({args.symbol}).price={diag_price} | USDT.available={diag_usdt}"
+                )
+            except Exception as diag_e:
+                logger.warning(f"[DIAG] No se pudo completar diagnóstico read-only: {diag_e}", exc_info=True)
         except Exception as e:
             logger.warning(
                 "WARNING: No se pudo cambiar el margen o apalancamiento, saltando configuración..."
             )
             logger.warning(f"Detalle Exception: {e}", exc_info=True)
     except Exception as e:
-        logger.error(f"[STARTUP] Error inesperado durante configuración de margen/apalancamiento: {e}", exc_info=True)
+        logger.error(
+            f"[STARTUP] Error inesperado durante configuración de margen/apalancamiento: {e}",
+            exc_info=True,
+        )
     info = client.futures_exchange_info()
     symbol_info = next(item for item in info['symbols'] if item['symbol'] == args.symbol)
     logger.info("===> Your service is live 🚀")
