@@ -288,15 +288,143 @@ def main():
     symbol_info = next(item for item in info['symbols'] if item['symbol'] == args.symbol)
     logger.info("===> Your service is live 🚀")
     
+    # Intervalo mecánico fijo
     while True:
         try:
-            logger.info("[LIVE] Revisando mercado real...")
+            # 1) Descargar klines recientes
+            klines = client.futures_klines(
+                symbol=args.symbol,
+                interval=args.interval,
+                limit=300,
+            )
+
+            df = pd.DataFrame(
+                klines,
+                columns=[
+                    "open_time",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                    "close_time",
+                    "quote_asset_volume",
+                    "number_of_trades",
+                    "taker_buy_base_asset_volume",
+                    "taker_buy_quote_asset_volume",
+                    "ignore",
+                ],
+            )
+
+            for c in ["open", "high", "low", "close", "volume"]:
+                df[c] = df[c].astype(float)
+
+            # 2) Indicadores
+            df_ind = prepare_indicators(df, cfg)
+            if df_ind.empty:
+                logger.warning("[LIVE] prepare_indicators devolvió DataFrame vacío. Saltando ciclo.")
+                time.sleep(60)
+                continue
+
+            # 3) Régimen
+            regime = detect_regime(df_ind, cfg)
+            last_row = df_ind.iloc[-1]
+            current_close = float(last_row["close"])
+            current_rsi = float(last_row["rsi"])
+
+            is_alcista = regime == "ALCISTA"
+            is_bajista = regime == "BAJISTA"
+            is_lateral = regime == "LATERAL"
+            print(
+                f"Régimen detectado: ALCISTA ({is_alcista}) / BAJISTA ({is_bajista}) / LATERAL ({is_lateral}) | "
+                f"Close={current_close:.6f} | RSI={current_rsi:.2f}",
+                flush=True,
+            )
+
+            # 4) Verificar posición activa
+            pos_info = client.futures_position_information(symbol=args.symbol)
+            position_amt = float(pos_info[0]["positionAmt"]) if pos_info else 0.0
+
+            # Solo entrar si no hay posición (mecánico: 1 posición a la vez)
+            if abs(position_amt) > 0:
+                logger.info(f"[LIVE] Posición ya activa (positionAmt={position_amt}). No abro una nueva.")
+                time.sleep(60)
+                continue
+
+            # Evitar órdenes huérfanas: cancelamos las existentes antes de abrir
+            client.futures_cancel_all_open_orders(symbol=args.symbol)
+
+            # 5) Reglas de entrada
+            if is_lateral and current_rsi <= cfg.lateral_rsi_entry:
+                sl_pct = cfg.sl_lateral_pct
+                tp_pct = cfg.tp_lateral_pct
+                qty = calculate_position_size(
+                    client=client,
+                    symbol=args.symbol,
+                    entry_price=current_close,
+                    sl_pct=sl_pct,
+                    cfg=cfg,
+                )
+                logger.info(f"[ENTRY] LATERAL->LONG qty={qty} sl_pct={sl_pct} tp_pct={tp_pct}")
+                if qty > 0:
+                    _place_long_with_stop(
+                        client,
+                        args.symbol,
+                        qty,
+                        current_close,
+                        sl_pct,
+                        tp_pct,
+                        symbol_info,
+                    )
+            elif is_alcista and current_rsi <= cfg.bullish_rsi_entry:
+                sl_pct = cfg.sl_bullish_pct
+                tp_pct = cfg.tp_bullish_pct
+                qty = calculate_position_size(
+                    client=client,
+                    symbol=args.symbol,
+                    entry_price=current_close,
+                    sl_pct=sl_pct,
+                    cfg=cfg,
+                )
+                logger.info(f"[ENTRY] ALCISTA->LONG qty={qty} sl_pct={sl_pct} tp_pct={tp_pct}")
+                if qty > 0:
+                    _place_long_with_stop(
+                        client,
+                        args.symbol,
+                        qty,
+                        current_close,
+                        sl_pct,
+                        tp_pct,
+                        symbol_info,
+                    )
+            elif is_bajista and current_rsi >= cfg.bearish_rsi_entry:
+                sl_pct = cfg.sl_bearish_pct
+                tp_pct = cfg.tp_bearish_pct
+                qty = calculate_position_size(
+                    client=client,
+                    symbol=args.symbol,
+                    entry_price=current_close,
+                    sl_pct=sl_pct,
+                    cfg=cfg,
+                )
+                logger.info(f"[ENTRY] BAJISTA->SHORT qty={qty} sl_pct={sl_pct} tp_pct={tp_pct}")
+                if qty > 0:
+                    _place_short_with_sl_tp(
+                        client,
+                        args.symbol,
+                        qty,
+                        current_close,
+                        sl_pct,
+                        tp_pct,
+                        symbol_info,
+                    )
+
             time.sleep(60)
         except KeyboardInterrupt:
             logger.info("Bot detenido por el usuario.")
             break
         except Exception as e:
-            logger.error(f"Error en el bucle principal: {e}")
+            logger.error(f"Error en el bucle principal: {e}", exc_info=True)
             time.sleep(10)
 if __name__ == '__main__':
     main()
