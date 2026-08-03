@@ -147,13 +147,13 @@ class StrategyConfig:
     leverage: int = 5
 
     # Lateral (Rango)
-    lateral_rsi_entry: float = 30.0
+    lateral_rsi_entry: float = 38.0
     lateral_rsi_exit: float = 70.0
     sl_lateral_pct: float = 0.0030   # -0.30%
     tp_lateral_pct: float = 0.0035   # +0.35%
 
     # Alcista (Up)
-    bullish_rsi_entry: float = 45.0
+    bullish_rsi_entry: float = 65.0
     sl_bullish_pct: float = 0.0040   # -0.40%
     tp_bullish_pct: float = 0.0100   # +1.00%
 
