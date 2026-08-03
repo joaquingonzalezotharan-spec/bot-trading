@@ -833,6 +833,7 @@ def _cancel_all_open_orders(client: "Client", symbol: str) -> None:
 def _place_long_with_stop(
     client: "Client",
     symbol: str,
+    step_size: float,
     tick_size: float,
     entry_price: float,
     sl_pct: float,
@@ -844,6 +845,24 @@ def _place_long_with_stop(
     - STOP_MARKET (Stop Loss) a entry*(1 - sl_pct)
     - TAKE_PROFIT_MARKET (Take Profit) a entry*(1 + tp_pct)
     """
+    # Si existe una posición opuesta (SHORT) debemos cerrarla primero para evitar
+    # que Binance rechace la apertura por tener contratos previos.
+    position_amt = _get_open_position_amt(client, symbol)
+    if position_amt < 0:
+        _close_short_market(client, symbol, step_size)
+    elif position_amt > 0:
+        # Extra seguridad: si por algún motivo ya hubiera LONG abierto, lo cerramos.
+        _close_long_market(client, symbol, step_size)
+
+    # Esperamos a que se vea la posición en 0 (reduce el riesgo de órdenes huérfanas).
+    for _ in range(10):
+        if abs(_get_open_position_amt(client, symbol)) < 1e-12:
+            break
+        time.sleep(0.2)
+
+    # Cancelamos cualquier orden condicional previa para no dejar órdenes huérfanas.
+    _cancel_all_open_orders(client, symbol)
+
     if quantity <= 0:
         raise RuntimeError("Cantidad inválida (<= 0).")
 
@@ -909,6 +928,7 @@ def _close_long_market(
 def _place_short_with_sl_tp(
     client: "Client",
     symbol: str,
+    step_size: float,
     tick_size: float,
     entry_price: float,
     sl_pct: float,
@@ -920,6 +940,24 @@ def _place_short_with_sl_tp(
     - STOP_MARKET (Stop Loss) a entry*(1 + sl_pct)
     - TAKE_PROFIT_MARKET (Take Profit) a entry*(1 - tp_pct)
     """
+    # Si existe una posición opuesta (LONG) debemos cerrarla primero para evitar
+    # rechazos al abrir SHORT con contratos previos.
+    position_amt = _get_open_position_amt(client, symbol)
+    if position_amt > 0:
+        _close_long_market(client, symbol, step_size)
+    elif position_amt < 0:
+        # Extra seguridad: si por algún motivo ya hubiera SHORT abierto, lo cerramos.
+        _close_short_market(client, symbol, step_size)
+
+    # Esperamos a que se vea la posición en 0 (reduce el riesgo de órdenes huérfanas).
+    for _ in range(10):
+        if abs(_get_open_position_amt(client, symbol)) < 1e-12:
+            break
+        time.sleep(0.2)
+
+    # Cancelamos cualquier orden condicional previa para no dejar órdenes huérfanas.
+    _cancel_all_open_orders(client, symbol)
+
     if quantity <= 0:
         raise RuntimeError("Cantidad inválida (<= 0).")
 
@@ -1302,6 +1340,7 @@ def main() -> None:
                         _place_long_with_stop(
                             binance_client,
                             args.symbol,
+                            step_size,
                             tick_size,
                             last_close,
                             cfg.sl_lateral_pct,
@@ -1326,6 +1365,7 @@ def main() -> None:
                         _place_long_with_stop(
                             binance_client,
                             args.symbol,
+                            step_size,
                             tick_size,
                             last_close,
                             cfg.sl_bullish_pct,
@@ -1350,6 +1390,7 @@ def main() -> None:
                         _place_short_with_sl_tp(
                             binance_client,
                             args.symbol,
+                            step_size,
                             tick_size,
                             last_close,
                             cfg.sl_bearish_pct,
