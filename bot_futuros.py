@@ -174,9 +174,14 @@ def main():
     args = parser.parse_args()
     
     cfg = StrategyConfig()
-    api_key = os.getenv('BINANCE_API_KEY', 'TU_API_KEY')
-    api_secret = os.getenv('BINANCE_API_SECRET', 'TU_API_SECRET')
-    client = Client(api_key, api_secret)
+    api_key = os.environ.get("BINANCE_API_KEY")
+    api_secret = os.environ.get("BINANCE_API_SECRET")
+    if not api_key or not api_secret:
+        logger.warning(
+            "WARNING: Credenciales Binance no configuradas (BINANCE_API_KEY/BINANCE_API_SECRET). "
+            "El bot continuará en modo no garantizado, pero no abortará el contenedor."
+        )
+    client = Client(api_key or "", api_secret or "")
     
     logger.info(f"=== Inicializando bot para {args.symbol} ===")
     
@@ -187,24 +192,38 @@ def main():
     except BinanceAPIException as e:
         logger.warning(f"[STARTUP] No se pudieron purgar las órdenes en el arranque: {e}")
     
+    # Ajustes de margen/apalancamiento: best-effort.
+    # Si fallan (p.ej. APIError -2015 por credenciales/permiso), NO rompemos el contenedor.
     try:
         logger.info(f"[STARTUP] Ajustando Margin Type a ISOLATED y Leverage a {cfg.leverage}x...")
+
         # Pre-cancel: si hay órdenes abiertas residuales, el cambio de marginType
         # puede fallar con APIError (-4067). Cancelamos antes de intentar.
         try:
-            logger.info(f"[STARTUP] Cancelando órdenes abiertas antes de marginType ISOLATED ({args.symbol})...")
+            logger.info(
+                f"[STARTUP] Cancelando órdenes abiertas antes de marginType ISOLATED ({args.symbol})..."
+            )
             client.futures_cancel_all_open_orders(symbol=args.symbol)
         except Exception as e:
-            logger.warning(f"[STARTUP] No se pudieron limpiar órdenes previas antes de ISOLATED: {e}")
+            logger.warning(
+                f"[STARTUP] No se pudieron limpiar órdenes previas antes de ISOLATED: {e}"
+            )
 
         try:
             client.futures_change_margin_type(symbol=args.symbol, marginType="ISOLATED")
+            client.futures_change_leverage(symbol=args.symbol, leverage=cfg.leverage)
+        except BinanceAPIException as e:
+            logger.warning(
+                "WARNING: No se pudo cambiar el margen o apalancamiento, saltando configuración..."
+            )
+            logger.warning(f"Detalle BinanceAPIException: {e}", exc_info=True)
         except Exception as e:
-            logger.error(f"[STARTUP] Falló futures_change_margin_type a ISOLATED para {args.symbol}: {e}")
-            sys.exit(1)
-        client.futures_change_leverage(symbol=args.symbol, leverage=cfg.leverage)
-    except BinanceAPIException as e:
-        logger.warning(f"[STARTUP] Alerta al configurar margen/apalancamiento: {e}. Continuando...")
+            logger.warning(
+                "WARNING: No se pudo cambiar el margen o apalancamiento, saltando configuración..."
+            )
+            logger.warning(f"Detalle Exception: {e}", exc_info=True)
+    except Exception as e:
+        logger.error(f"[STARTUP] Error inesperado durante configuración de margen/apalancamiento: {e}", exc_info=True)
     info = client.futures_exchange_info()
     symbol_info = next(item for item in info['symbols'] if item['symbol'] == args.symbol)
     logger.info("===> Your service is live 🚀")
