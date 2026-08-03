@@ -196,7 +196,7 @@ def main():
     # IMPORTANTE: si el proveedor NO quiere permitir IPs “dinámicas”,
     # usa el DOMINIO principal del proveedor aquí (vía variable de entorno)
     # y deja que la autenticación dependa solo de user/pass.
-    proxy_host = os.environ.get("PROXY_HOST") or "PROXY_HOST_DEL_PROVEEDOR_AQUI"
+    proxy_host = "31.59.239.182"
 
     # Codificamos usuario/clave para que el URL sea válido.
     proxy_user_enc = quote(proxy_user, safe="")
