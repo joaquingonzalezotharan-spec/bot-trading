@@ -845,6 +845,10 @@ def _place_long_with_stop(
     - STOP_MARKET (Stop Loss) a entry*(1 - sl_pct)
     - TAKE_PROFIT_MARKET (Take Profit) a entry*(1 + tp_pct)
     """
+    # Antes de cualquier acción, cancelamos órdenes condicionales previas para
+    # evitar que queden huérfanas disparando durante el cierre/apertura.
+    _cancel_all_open_orders(client, symbol)
+
     # Si existe una posición opuesta (SHORT) debemos cerrarla primero para evitar
     # que Binance rechace la apertura por tener contratos previos.
     position_amt = _get_open_position_amt(client, symbol)
@@ -855,8 +859,10 @@ def _place_long_with_stop(
         _close_long_market(client, symbol, step_size)
 
     # Esperamos a que se vea la posición en 0 (reduce el riesgo de órdenes huérfanas).
+    # Usamos una tolerancia ligada al step_size porque Binance puede dejar restos mínimos.
+    tol_qty = max(step_size / 2.0, 1e-8)
     for _ in range(10):
-        if abs(_get_open_position_amt(client, symbol)) < 1e-12:
+        if abs(_get_open_position_amt(client, symbol)) <= tol_qty:
             break
         time.sleep(0.2)
 
@@ -940,6 +946,10 @@ def _place_short_with_sl_tp(
     - STOP_MARKET (Stop Loss) a entry*(1 + sl_pct)
     - TAKE_PROFIT_MARKET (Take Profit) a entry*(1 - tp_pct)
     """
+    # Antes de cualquier acción, cancelamos órdenes condicionales previas para
+    # evitar que queden huérfanas disparando durante el cierre/apertura.
+    _cancel_all_open_orders(client, symbol)
+
     # Si existe una posición opuesta (LONG) debemos cerrarla primero para evitar
     # rechazos al abrir SHORT con contratos previos.
     position_amt = _get_open_position_amt(client, symbol)
@@ -950,8 +960,9 @@ def _place_short_with_sl_tp(
         _close_short_market(client, symbol, step_size)
 
     # Esperamos a que se vea la posición en 0 (reduce el riesgo de órdenes huérfanas).
+    tol_qty = max(step_size / 2.0, 1e-8)
     for _ in range(10):
-        if abs(_get_open_position_amt(client, symbol)) < 1e-12:
+        if abs(_get_open_position_amt(client, symbol)) <= tol_qty:
             break
         time.sleep(0.2)
 
