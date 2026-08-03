@@ -91,6 +91,7 @@ def _build_periodic_report_message(
     operations: List[str],
     net_pnl_usdt: float,
     available_balance_usdt: Optional[float],
+    total_wallet_balance_usdt: Optional[float],
 ) -> str:
     ops_preview_limit = 30
     ops_count = len(operations)
@@ -102,10 +103,15 @@ def _build_periodic_report_message(
         if ops_count > ops_preview_limit:
             ops_block += f"\n- ... y {ops_count - ops_preview_limit} operación(es) adicionales."
 
-    if available_balance_usdt is None:
-        balance_block = "Balance Binance disponible: N/A"
+    if total_wallet_balance_usdt is None:
+        balance_total_block = "💰 Balance Total: N/A"
     else:
-        balance_block = f"Balance Binance disponible: {available_balance_usdt:.2f} USDT"
+        balance_total_block = f"💰 Balance Total: {total_wallet_balance_usdt:.2f} USDT"
+
+    if available_balance_usdt is None:
+        available_balance_block = "🔓 Margen Disponible: N/A"
+    else:
+        available_balance_block = f"🔓 Margen Disponible: {available_balance_usdt:.2f} USDT"
 
     if net_pnl_usdt >= 0:
         net_block = f"Ganancias netas (USDT): {_format_signed_usdt(net_pnl_usdt)}"
@@ -117,7 +123,8 @@ def _build_periodic_report_message(
         f"Régimen de Mercado actual: {regime}\n"
         f"Operaciones ejecutadas (últimas 4 horas):\n{ops_block}\n"
         f"{net_block}\n"
-        f"{balance_block}"
+        f"{balance_total_block}\n"
+        f"{available_balance_block}"
     )
 
 
@@ -738,6 +745,25 @@ def _get_available_margin_usdt(client: "Client") -> float:
     return float(account.get("totalWalletBalance", 0.0))
 
 
+def _get_available_and_total_wallet_balance_usdt(client: "Client") -> tuple[Optional[float], Optional[float]]:
+    """
+    Lee ambos saldos (disponible y total) desde futures_account().
+    """
+    account = client.futures_account()
+
+    available_balance_usdt: Optional[float] = None
+    for key in ("availableBalance", "available_balance"):
+        if key in account and account[key] is not None:
+            available_balance_usdt = float(account[key])
+            break
+
+    total_wallet_balance_usdt: Optional[float] = None
+    if "totalWalletBalance" in account and account["totalWalletBalance"] is not None:
+        total_wallet_balance_usdt = float(account["totalWalletBalance"])
+
+    return available_balance_usdt, total_wallet_balance_usdt
+
+
 def _compute_quantity_from_risk(
     *,
     available_margin_usdt: float,
@@ -1092,17 +1118,22 @@ def main() -> None:
             now_epoch_s = time.time()
             if now_epoch_s >= next_report_epoch_s:
                 available_balance_usdt: Optional[float] = None
+                total_wallet_balance_usdt: Optional[float] = None
                 if binance_client is not None:
                     try:
-                        available_balance_usdt = _get_available_margin_usdt(binance_client)
+                        available_balance_usdt, total_wallet_balance_usdt = _get_available_and_total_wallet_balance_usdt(
+                            binance_client
+                        )
                     except Exception:
                         available_balance_usdt = None
+                        total_wallet_balance_usdt = None
 
                 report_msg = _build_periodic_report_message(
                     regime=last_detected_regime,
                     operations=period_operations,
                     net_pnl_usdt=period_net_pnl_usdt,
                     available_balance_usdt=available_balance_usdt,
+                    total_wallet_balance_usdt=total_wallet_balance_usdt,
                 )
                 enviar_telegram(report_msg)
 
@@ -1402,17 +1433,22 @@ def main() -> None:
             now_epoch_s = time.time()
             if now_epoch_s >= next_report_epoch_s:
                 available_balance_usdt: Optional[float] = None
+                total_wallet_balance_usdt: Optional[float] = None
                 if binance_client is not None:
                     try:
-                        available_balance_usdt = _get_available_margin_usdt(binance_client)
+                        available_balance_usdt, total_wallet_balance_usdt = _get_available_and_total_wallet_balance_usdt(
+                            binance_client
+                        )
                     except Exception:
                         available_balance_usdt = None
+                        total_wallet_balance_usdt = None
 
                 report_msg = _build_periodic_report_message(
                     regime=last_detected_regime,
                     operations=period_operations,
                     net_pnl_usdt=period_net_pnl_usdt,
                     available_balance_usdt=available_balance_usdt,
+                    total_wallet_balance_usdt=total_wallet_balance_usdt,
                 )
                 enviar_telegram(report_msg)
 
