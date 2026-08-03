@@ -19,6 +19,27 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 # =====================================================================
+# ENVÍO DE NOTIFICACIONES TELEGRAM (con el mismo proxy que Binance)
+# =====================================================================
+def enviar_telegram(mensaje: str, *, proxies: dict | None = None) -> None:
+    token = os.environ.get("TELEGRAM_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        return
+
+    try:
+        import requests  # type: ignore
+
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        requests.post(
+            url,
+            data={"chat_id": chat_id, "text": mensaje},
+            timeout=10,
+            proxies=proxies,
+        )
+    except Exception as e:
+        logger.warning(f"[TELEGRAM] No se pudo enviar mensaje: {e}", exc_info=True)
+# =====================================================================
 # CONFIGURACIÓN DE LA ESTRATEGIA (StrategyConfig)
 # =====================================================================
 class StrategyConfig:
@@ -205,6 +226,10 @@ def main():
     requests_params = {"proxies": {"http": proxy_url, "https": proxy_url}}
 
     client = Client(api_key or "", api_secret or "", requests_params=requests_params)
+    enviar_telegram(
+        f"[BOT INICIADO] symbol={args.symbol} | interval={args.interval} | leverage={cfg.leverage}x",
+        proxies=requests_params.get("proxies"),
+    )
     
     logger.info(f"=== Inicializando bot para {args.symbol} ===")
     
