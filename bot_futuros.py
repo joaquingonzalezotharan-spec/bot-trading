@@ -800,6 +800,18 @@ def _compute_quantity_from_risk(
     qty_up = _round_up_to_step(desired_qty, step_size)
     if qty_up <= 0:
         qty_up = 0.0
+    qty_down = _round_down_to_step(desired_qty, step_size)
+    if qty_down <= 0:
+        qty_down = 0.0
+
+    # Log temporal para depurar por qué el bot a veces calcula qty=0.
+    print(
+        f"[DEBUG_QTY] available_margin_usdt={available_margin_usdt:.6f} | "
+        f"risk_budget_usdt={risk_budget_usdt:.6f} | "
+        f"desired_qty={desired_qty:.12f} | "
+        f"qty_up={qty_up:.12f} | qty_down={qty_down:.12f}",
+        flush=True,
+    )
 
     margin_used_up = (qty_up * float(entry_price)) / float(cfg.leverage)
     if margin_used_up <= risk_budget_usdt + 1e-9:
@@ -808,10 +820,6 @@ def _compute_quantity_from_risk(
             return qty_up
 
     # Si el redondeo excede el presupuesto, bajamos.
-    qty_down = _round_down_to_step(desired_qty, step_size)
-    if qty_down <= 0:
-        qty_down = 0.0
-
     margin_used_down = (qty_down * float(entry_price)) / float(cfg.leverage)
     if margin_used_down <= risk_budget_usdt + 1e-9:
         if qty_down > 0:
