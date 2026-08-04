@@ -67,6 +67,64 @@ def calculate_qty_fixed_risk(
         return 0.0
 
     return float(qty)
+
+
+def get_effective_position_amt(
+    client: Client,
+    symbol: str,
+    *,
+    position_amt: float,
+    lookback_seconds: int = 180,
+) -> float:
+    """
+    Binance puede tardar en reflejar cambios de positionAmt tras cierres rápidos.
+    Si detectamos que el SL/TP reduceOnly ya se llenó recientemente, forzamos a 0
+    para evitar bloqueos en la lógica de entrada.
+    """
+    if abs(position_amt) == 0:
+        return 0.0
+
+    # Si aún hay órdenes abiertas, mantenemos la posición como activa.
+    try:
+        open_orders = client.futures_get_open_orders(symbol=symbol)
+        if open_orders:
+            return position_amt
+    except Exception:
+        # Si no podemos consultar, no hacemos suposiciones.
+        return position_amt
+
+    now_ms = int(time.time() * 1000)
+    lookback_ms = lookback_seconds * 1000
+
+    # Revisamos órdenes recientes llenadas (reduceOnly) de SL/TP.
+    try:
+        all_orders = client.futures_get_all_orders(symbol=symbol, limit=20)
+        for o in all_orders:
+            status = o.get("status")
+            o_type = o.get("type")
+            reduce_only = o.get("reduceOnly")
+            if not reduce_only:
+                continue
+            if status != "FILLED":
+                continue
+            if o_type not in ("STOP_MARKET", "LIMIT"):
+                continue
+
+            update_time = o.get("updateTime") or o.get("time")
+            if update_time is None:
+                continue
+
+            try:
+                update_ms = int(update_time)
+            except Exception:
+                continue
+
+            if now_ms - update_ms <= lookback_ms:
+                return 0.0
+    except Exception:
+        return position_amt
+
+    return position_amt
 # =====================================================================
 # ENVÍO DE NOTIFICACIONES TELEGRAM (con el mismo proxy que Binance)
 # =====================================================================
@@ -446,6 +504,12 @@ def main():
             # 4) Verificar posición activa
             pos_info = client.futures_position_information(symbol=args.symbol)
             position_amt = float(pos_info[0]["positionAmt"]) if pos_info else 0.0
+            position_amt = get_effective_position_amt(
+                client,
+                args.symbol,
+                position_amt=position_amt,
+                lookback_seconds=180,
+            )
 
             # Reporte a Telegram cada 2 horas (exacto por timestamp, con re-sincronización).
             now_ts = time.time()
