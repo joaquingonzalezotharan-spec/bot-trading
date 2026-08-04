@@ -340,6 +340,10 @@ def main():
     symbol_info = next(item for item in info['symbols'] if item['symbol'] == args.symbol)
     logger.info("===> Your service is live 🚀")
     
+    # Reporte periódico a Telegram cada 2 horas (sin interferir con el loop de 60s).
+    report_interval_s = 2 * 60 * 60
+    next_report_ts = time.time() + report_interval_s
+    
     # Intervalo mecánico fijo
     while True:
         try:
@@ -401,6 +405,46 @@ def main():
             # 4) Verificar posición activa
             pos_info = client.futures_position_information(symbol=args.symbol)
             position_amt = float(pos_info[0]["positionAmt"]) if pos_info else 0.0
+
+            # Reporte a Telegram cada 2 horas (exacto por timestamp, con re-sincronización).
+            now_ts = time.time()
+            if now_ts >= next_report_ts:
+                try:
+                    if abs(position_amt) > 0:
+                        side = "Long" if position_amt > 0 else "Short"
+                        size_btc = abs(position_amt)
+                        entry_price_val = None
+                        try:
+                            entry_price_val = pos_info[0].get("entryPrice") or pos_info[0].get("entry_price")
+                            entry_price_val = float(entry_price_val) if entry_price_val is not None else None
+                        except Exception:
+                            entry_price_val = None
+                        if entry_price_val is not None:
+                            position_block = f"{side} | positionAmt={size_btc:.6f} | entryPrice={entry_price_val:.6f}"
+                        else:
+                            position_block = f"{side} | positionAmt={size_btc:.6f}"
+                    else:
+                        position_block = "Sin posiciones activas"
+
+                    msg = (
+                        "Estado de la Posición Actual:\n"
+                        f"{position_block}\n\n"
+                        "Métricas de Mercado Recientes:\n"
+                        f"Régimen detectado: {regime}\n"
+                        f"Close actual: {current_close:.6f}\n"
+                        f"Último RSI: {current_rsi:.2f}\n\n"
+                        "Filtro de Volumen:\n"
+                        f"volume_ok={volume_ok}\n"
+                        f"Volumen última vela: {current_volume:.6f}\n"
+                        f"VolAvg20: {vol_avg20:.6f} (factor=1.2)\n"
+                    )
+
+                    enviar_telegram(msg, proxies=requests_params.get("proxies"))
+                except Exception as e:
+                    logger.warning(f"[TELEGRAM] Error enviando reporte de estado: {e}", exc_info=True)
+                # Avanzar en múltiplos de 2h hasta quedar en el futuro.
+                while next_report_ts <= now_ts:
+                    next_report_ts += report_interval_s
 
             # Solo entrar si no hay posición (mecánico: 1 posición a la vez)
             if abs(position_amt) > 0:
