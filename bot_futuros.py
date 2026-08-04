@@ -18,6 +18,55 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
+
+# =====================================================================
+# RIESGO FIJO POR OPERACIÓN (USD)
+# =====================================================================
+# Pérdida máxima fija estimada en USD por operación (bajo el SL configurado).
+RISK_PER_TRADE = 2.5
+
+
+def calculate_qty_fixed_risk(
+    client: Client,
+    symbol: str,
+    entry_price: float,
+    sl_pct: float,
+    cfg: StrategyConfig,
+    decimals: int = 3,
+    min_qty: float = 0.001,
+) -> float:
+    """
+    qty = RISK_PER_TRADE / (entry_price * sl_pct)
+    - truncado estricto hacia abajo a `decimals` para no inflar por precisión
+    - capado por margen disponible con leverage cfg.leverage
+    """
+    if entry_price <= 0 or sl_pct <= 0:
+        return 0.0
+
+    qty = RISK_PER_TRADE / (entry_price * sl_pct)
+
+    factor = 10**decimals
+    qty = math.floor(qty * factor) / factor
+    if qty < min_qty:
+        qty = min_qty
+
+    # Cap por margen disponible (estimación: required_margin ~= notional/leverage)
+    try:
+        account = client.futures_account()
+        balance = float(account["totalMarginBalance"])
+    except Exception:
+        return qty
+
+    max_qty = (balance * float(cfg.leverage)) / entry_price
+    max_qty = math.floor(max_qty * factor) / factor
+
+    if qty > max_qty:
+        qty = max_qty
+
+    if qty < min_qty:
+        return 0.0
+
+    return float(qty)
 # =====================================================================
 # ENVÍO DE NOTIFICACIONES TELEGRAM (con el mismo proxy que Binance)
 # =====================================================================
@@ -358,7 +407,7 @@ def main():
             if is_lateral and current_rsi <= cfg.lateral_rsi_entry:
                 sl_pct = cfg.sl_lateral_pct
                 tp_pct = cfg.tp_lateral_pct
-                qty = calculate_position_size(
+                qty = calculate_qty_fixed_risk(
                     client=client,
                     symbol=args.symbol,
                     entry_price=current_close,
@@ -379,7 +428,7 @@ def main():
             elif is_alcista and current_rsi <= cfg.bullish_rsi_entry:
                 sl_pct = cfg.sl_bullish_pct
                 tp_pct = cfg.tp_bullish_pct
-                qty = calculate_position_size(
+                qty = calculate_qty_fixed_risk(
                     client=client,
                     symbol=args.symbol,
                     entry_price=current_close,
@@ -400,7 +449,7 @@ def main():
             elif is_bajista and current_rsi >= cfg.bearish_rsi_entry:
                 sl_pct = cfg.sl_bearish_pct
                 tp_pct = cfg.tp_bearish_pct
-                qty = calculate_position_size(
+                qty = calculate_qty_fixed_risk(
                     client=client,
                     symbol=args.symbol,
                     entry_price=current_close,
