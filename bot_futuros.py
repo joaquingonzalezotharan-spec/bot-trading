@@ -159,7 +159,7 @@ class StrategyConfig:
     max_margin_per_trade_pct = 0.05  
     leverage = 5                     
     
-    lateral_rsi_entry = 38.0
+    lateral_rsi_entry = 32.0
     lateral_rsi_exit = 70.0
     sl_lateral_pct = 0.0030          
     tp_lateral_pct = 0.0035          
@@ -584,7 +584,7 @@ def main():
             df_ind = prepare_indicators(df, cfg)
             if df_ind.empty:
                 logger.warning("[LIVE] prepare_indicators devolvió DataFrame vacío. Saltando ciclo.")
-                time.sleep(60)
+                time.sleep(15)
                 continue
 
             # 3) Régimen
@@ -670,7 +670,7 @@ def main():
             # Solo entrar si no hay posición (mecánico: 1 posición a la vez)
             if abs(position_amt) > 0:
                 logger.info(f"[LIVE] Posición ya activa (positionAmt={position_amt}). No abro una nueva.")
-                time.sleep(60)
+                time.sleep(15)
                 continue
 
             # Evitar órdenes huérfanas: cancelamos las existentes antes de abrir
@@ -744,7 +744,7 @@ def main():
                         proxies=requests_params.get("proxies"),
                     )
 
-            time.sleep(60)
+            time.sleep(15)
         except KeyboardInterrupt:
             logger.info("Bot detenido por el usuario.")
             break
