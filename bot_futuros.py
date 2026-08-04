@@ -426,7 +426,28 @@ def main():
                     else:
                         position_block = "Sin posiciones activas"
 
+                    # Estado de la cuenta (solo lectura) en el reporte.
+                    total_usdt = None
+                    available_usdt = None
+                    try:
+                        diag_balances = client.futures_account_balance()
+                        for bal in diag_balances:
+                            if str(bal.get("asset", "")).upper() == "USDT":
+                                total_raw = bal.get("balance") or bal.get("walletBalance") or bal.get("totalWalletBalance")
+                                avail_raw = bal.get("availableBalance") or bal.get("available_balance")
+                                total_usdt = float(total_raw) if total_raw is not None else None
+                                available_usdt = float(avail_raw) if avail_raw is not None else None
+                                break
+                    except Exception as diag_e:
+                        logger.warning(f"[TELEGRAM] No se pudo obtener balances USDT para el reporte: {diag_e}", exc_info=True)
+
+                    total_usdt_str = f"{total_usdt:.6f}" if total_usdt is not None else "N/A"
+                    available_usdt_str = f"{available_usdt:.6f}" if available_usdt is not None else "N/A"
+
                     msg = (
+                        "Estado de la Cuenta:\n"
+                        f"Balance total (USDT): {total_usdt_str}\n"
+                        f"Margen Disponible para operar (USDT): {available_usdt_str}\n\n"
                         "Estado de la Posición Actual:\n"
                         f"{position_block}\n\n"
                         "Métricas de Mercado Recientes:\n"
