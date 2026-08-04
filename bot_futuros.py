@@ -672,6 +672,79 @@ def main():
             # Solo entrar si no hay posición (mecánico: 1 posición a la vez)
             if abs(position_amt) > 0:
                 logger.info(f"[LIVE] Posición ya activa (positionAmt={position_amt}). No abro una nueva.")
+                # Salvavidas: si por reinicio/no-ejecución Binance no dejó SL/TP,
+                # cerramos por MARKET cuando se alcance TP o se rompa SL.
+                try:
+                    open_orders = client.futures_get_open_orders(symbol=args.symbol)
+                except Exception:
+                    open_orders = []
+
+                has_reduce_sl_tp = False
+                for o in (open_orders or []):
+                    if o.get("reduceOnly") and o.get("type") in ("STOP_MARKET", "LIMIT"):
+                        has_reduce_sl_tp = True
+                        break
+
+                if not has_reduce_sl_tp:
+                    entry_price_val = None
+                    try:
+                        entry_price_val = pos_info[0].get("entryPrice") or pos_info[0].get("entry_price")
+                        entry_price_val = float(entry_price_val) if entry_price_val is not None else None
+                    except Exception:
+                        entry_price_val = None
+
+                    if entry_price_val is not None:
+                        if position_amt > 0:
+                            # LONG: TP = entry*(1+tp), SL = entry*(1-sl)
+                            if regime == "ALCISTA":
+                                tp_pct = cfg.tp_bullish_pct
+                                sl_pct = cfg.sl_bullish_pct
+                            else:
+                                tp_pct = cfg.tp_lateral_pct
+                                sl_pct = cfg.sl_lateral_pct
+
+                            tp_hit = current_close >= (entry_price_val * (1 + tp_pct))
+                            sl_hit = current_close <= (entry_price_val * (1 - sl_pct))
+
+                            if tp_hit or sl_hit:
+                                logger.warning(
+                                    f"[EMERGENCIA] LONG close inmediato por TP/SL. "
+                                    f"entry={entry_price_val} close={current_close} tp_pct={tp_pct} sl_pct={sl_pct}"
+                                )
+                                try:
+                                    client.futures_create_order(
+                                        symbol=args.symbol,
+                                        side="SELL",
+                                        type="MARKET",
+                                        quantity=abs(position_amt),
+                                        reduceOnly=True,
+                                    )
+                                except Exception as e:
+                                    logger.warning(f"[EMERGENCIA] Falló cierre LONG: {e}", exc_info=True)
+                        else:
+                            # SHORT: TP = entry*(1-tp), SL = entry*(1+sl)
+                            tp_pct = cfg.tp_bearish_pct
+                            sl_pct = cfg.sl_bearish_pct
+
+                            tp_hit = current_close <= (entry_price_val * (1 - tp_pct))
+                            sl_hit = current_close >= (entry_price_val * (1 + sl_pct))
+
+                            if tp_hit or sl_hit:
+                                logger.warning(
+                                    f"[EMERGENCIA] SHORT close inmediato por TP/SL. "
+                                    f"entry={entry_price_val} close={current_close} tp_pct={tp_pct} sl_pct={sl_pct}"
+                                )
+                                try:
+                                    client.futures_create_order(
+                                        symbol=args.symbol,
+                                        side="BUY",
+                                        type="MARKET",
+                                        quantity=abs(position_amt),
+                                        reduceOnly=True,
+                                    )
+                                except Exception as e:
+                                    logger.warning(f"[EMERGENCIA] Falló cierre SHORT: {e}", exc_info=True)
+
                 time.sleep(15)
                 continue
 
