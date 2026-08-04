@@ -137,6 +137,9 @@ def prepare_indicators(df: pd.DataFrame, cfg: StrategyConfig) -> pd.DataFrame:
     
     df['bb_upper_expanded'] = df['bb_middle'] + 1.5 * (df['bb_upper'] - df['bb_middle'])
     df['slope_bb'] = df['bb_middle'].diff(periods=3)
+
+    # Filtro de volumen: promedio de las últimas 20 velas.
+    df["vol_avg20"] = df["volume"].rolling(20).mean()
     
     return df
 # =====================================================================
@@ -380,12 +383,17 @@ def main():
             last_row = df_ind.iloc[-1]
             current_close = float(last_row["close"])
             current_rsi = float(last_row["rsi"])
+            current_volume = float(last_row["volume"])
+            vol_avg20 = float(last_row["vol_avg20"])
 
             is_alcista = regime == "ALCISTA"
             is_bajista = regime == "BAJISTA"
             is_lateral = regime == "LATERAL"
+            volume_ok = np.isfinite(vol_avg20) and current_volume > (vol_avg20 * 1.2)
             print(
+                f"[LIVE] Revisando mercado real... "
                 f"Régimen detectado: ALCISTA ({is_alcista}) / BAJISTA ({is_bajista}) / LATERAL ({is_lateral}) | "
+                f"VolumenOK={volume_ok} | Vol={current_volume:.6f} | VolAvg20={vol_avg20:.6f} | "
                 f"Close={current_close:.6f} | RSI={current_rsi:.2f}",
                 flush=True,
             )
@@ -404,7 +412,7 @@ def main():
             client.futures_cancel_all_open_orders(symbol=args.symbol)
 
             # 5) Reglas de entrada
-            if is_lateral and current_rsi <= cfg.lateral_rsi_entry:
+            if is_lateral and volume_ok and current_rsi <= cfg.lateral_rsi_entry:
                 sl_pct = cfg.sl_lateral_pct
                 tp_pct = cfg.tp_lateral_pct
                 qty = calculate_qty_fixed_risk(
@@ -425,7 +433,7 @@ def main():
                         tp_pct,
                         symbol_info,
                     )
-            elif is_alcista and current_rsi <= cfg.bullish_rsi_entry:
+            elif is_alcista and volume_ok and current_rsi <= cfg.bullish_rsi_entry:
                 sl_pct = cfg.sl_bullish_pct
                 tp_pct = cfg.tp_bullish_pct
                 qty = calculate_qty_fixed_risk(
@@ -446,7 +454,7 @@ def main():
                         tp_pct,
                         symbol_info,
                     )
-            elif is_bajista and current_rsi >= cfg.bearish_rsi_entry:
+            elif is_bajista and volume_ok and current_rsi >= cfg.bearish_rsi_entry:
                 sl_pct = cfg.sl_bearish_pct
                 tp_pct = cfg.tp_bearish_pct
                 qty = calculate_qty_fixed_risk(
