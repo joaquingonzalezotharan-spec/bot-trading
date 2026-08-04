@@ -355,6 +355,35 @@ def main():
     # Reporte periódico a Telegram cada 2 horas (sin interferir con el loop de 60s).
     report_interval_s = 2 * 60 * 60
     next_report_ts = time.time() + report_interval_s
+
+    def enviar_reporte_estado_2h(
+        *,
+        position_block: str,
+        regime: str,
+        current_close: float,
+        current_rsi: float,
+        volume_ok: bool,
+        total_usdt: float | None,
+        available_usdt: float | None,
+    ) -> None:
+        total_usdt_str = f"{total_usdt:.6f}" if total_usdt is not None else "N/A"
+        available_usdt_str = f"{available_usdt:.6f}" if available_usdt is not None else "N/A"
+
+        msg = (
+            "Estado de la Cuenta: \n"
+            f"Balance total: {total_usdt_str} USDT\n"
+            f"Margen Disponible: {available_usdt_str} USDT\n\n"
+            "Estado de la Posición: \n"
+            f"{position_block}\n\n"
+            "Métricas del Mercado: \n"
+            f"Régimen: {regime}\n"
+            f"Close actual: {current_close:.6f}\n"
+            f"RSI actual: {current_rsi:.2f}\n\n"
+            "Filtro de Volumen: \n"
+            f"volume_ok={volume_ok}"
+        )
+
+        enviar_telegram(msg, proxies=requests_params.get("proxies"))
     
     # Intervalo mecánico fijo
     while True:
@@ -453,26 +482,15 @@ def main():
                     except Exception as diag_e:
                         logger.warning(f"[TELEGRAM] No se pudo obtener balances USDT para el reporte: {diag_e}", exc_info=True)
 
-                    total_usdt_str = f"{total_usdt:.6f}" if total_usdt is not None else "N/A"
-                    available_usdt_str = f"{available_usdt:.6f}" if available_usdt is not None else "N/A"
-
-                    msg = (
-                        "Estado de la Cuenta:\n"
-                        f"Balance total (USDT): {total_usdt_str}\n"
-                        f"Margen Disponible para operar (USDT): {available_usdt_str}\n\n"
-                        "Estado de la Posición Actual:\n"
-                        f"{position_block}\n\n"
-                        "Métricas de Mercado Recientes:\n"
-                        f"Régimen detectado: {regime}\n"
-                        f"Close actual: {current_close:.6f}\n"
-                        f"Último RSI: {current_rsi:.2f}\n\n"
-                        "Filtro de Volumen:\n"
-                        f"volume_ok={volume_ok}\n"
-                        f"Volumen última vela: {current_volume:.6f}\n"
-                        f"VolAvg20: {vol_avg20:.6f} (factor=1.2)\n"
+                    enviar_reporte_estado_2h(
+                        position_block=position_block,
+                        regime=regime,
+                        current_close=current_close,
+                        current_rsi=current_rsi,
+                        volume_ok=volume_ok,
+                        total_usdt=total_usdt,
+                        available_usdt=available_usdt,
                     )
-
-                    enviar_telegram(msg, proxies=requests_params.get("proxies"))
                 except Exception as e:
                     logger.warning(f"[TELEGRAM] Error enviando reporte de estado: {e}", exc_info=True)
                 # Avanzar en múltiplos de 2h hasta quedar en el futuro.
