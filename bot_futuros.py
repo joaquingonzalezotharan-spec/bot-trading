@@ -307,25 +307,37 @@ def main():
             client.futures_change_margin_type(symbol=args.symbol, marginType="ISOLATED")
             client.futures_change_leverage(symbol=args.symbol, leverage=cfg.leverage)
         except BinanceAPIException as e:
-            logger.warning(
-                "WARNING: No se pudo cambiar el margen o apalancamiento, saltando configuración..."
-            )
-            logger.warning(f"Detalle BinanceAPIException: {e}", exc_info=True)
+            code = getattr(e, "code", None)
+            if code is None and getattr(e, "args", None):
+                code = e.args[0] if len(e.args) > 0 else None
 
-            # Diagnóstico read-only para saber si la API key sirve para lecturas.
-            try:
-                diag_price = client.futures_symbol_ticker(symbol=args.symbol).get("price")
-                diag_balances = client.futures_account_balance()
-                diag_usdt = None
-                for bal in diag_balances:
-                    if str(bal.get("asset", "")).upper() == "USDT":
-                        diag_usdt = bal.get("availableBalance") or bal.get("available_balance")
-                        break
+            if code == -4067:
                 logger.warning(
-                    f"[DIAG] ticker({args.symbol}).price={diag_price} | USDT.available={diag_usdt}"
+                    "⚠️ El tipo de margen ya está configurado o existen posiciones/órdenes abiertas. Omitiendo configuración inicial..."
                 )
-            except Exception as diag_e:
-                logger.warning(f"[DIAG] No se pudo completar diagnóstico read-only: {diag_e}", exc_info=True)
+            else:
+                logger.warning(
+                    "WARNING: No se pudo cambiar el margen o apalancamiento, saltando configuración..."
+                )
+                logger.warning(f"Detalle BinanceAPIException: {e}", exc_info=True)
+
+                # Diagnóstico read-only para saber si la API key sirve para lecturas.
+                try:
+                    diag_price = client.futures_symbol_ticker(symbol=args.symbol).get("price")
+                    diag_balances = client.futures_account_balance()
+                    diag_usdt = None
+                    for bal in diag_balances:
+                        if str(bal.get("asset", "")).upper() == "USDT":
+                            diag_usdt = bal.get("availableBalance") or bal.get("available_balance")
+                            break
+                    logger.warning(
+                        f"[DIAG] ticker({args.symbol}).price={diag_price} | USDT.available={diag_usdt}"
+                    )
+                except Exception as diag_e:
+                    logger.warning(
+                        f"[DIAG] No se pudo completar diagnóstico read-only: {diag_e}",
+                        exc_info=True,
+                    )
         except Exception as e:
             logger.warning(
                 "WARNING: No se pudo cambiar el margen o apalancamiento, saltando configuración..."
