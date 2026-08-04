@@ -598,7 +598,7 @@ def main():
             is_alcista = regime == "ALCISTA"
             is_bajista = regime == "BAJISTA"
             is_lateral = regime == "LATERAL"
-            volume_ok = np.isfinite(vol_avg20) and current_volume > (vol_avg20 * 1.2)
+            volume_ok = np.isfinite(vol_avg20) and current_volume >= (vol_avg20 * 0.5)
             print(
                 f"[LIVE] Revisando mercado real... "
                 f"Régimen detectado: ALCISTA ({is_alcista}) / BAJISTA ({is_bajista}) / LATERAL ({is_lateral}) | "
@@ -610,6 +610,8 @@ def main():
             # 4) Verificar posición activa
             pos_info = client.futures_position_information(symbol=args.symbol)
             position_amt = float(pos_info[0]["positionAmt"]) if pos_info else 0.0
+            # Ignorar micro-saldos residuales que bloquean aperturas.
+            position_amt = position_amt if abs(position_amt) >= 0.001 else 0.0
             position_amt = get_effective_position_amt(
                 client,
                 args.symbol,
