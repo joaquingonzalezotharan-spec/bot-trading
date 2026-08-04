@@ -257,6 +257,18 @@ def _place_long_with_stop(client: Client, symbol: str, qty: float, entry_price: 
     try:
         logger.info(f"[ORDEN] Abriendo posición LONG en Market. Cantidad: {qty}")
         client.futures_create_order(symbol=symbol, side="BUY", type="MARKET", quantity=qty)
+
+        # IMPORTANTE: esperamos a que Binance refleje la posición antes de
+        # enviar órdenes reduceOnly (evita APIError "Reduce-only order failed").
+        for _ in range(10):
+            try:
+                pos_info = client.futures_position_information(symbol=symbol)
+                pos_amt = float(pos_info[0]["positionAmt"]) if pos_info else 0.0
+                if pos_amt > 0:
+                    break
+            except Exception:
+                pass
+            time.sleep(0.2)
         
         take_profit_price = round_price(entry_price * (1 + tp_pct), symbol_info)
         stop_loss_price = round_price(entry_price * (1 - sl_pct), symbol_info)
@@ -278,6 +290,18 @@ def _place_short_with_sl_tp(client: Client, symbol: str, qty: float, entry_price
     try:
         logger.info(f"[ORDEN] Abriendo posición SHORT en Market. Cantidad: {qty}")
         client.futures_create_order(symbol=symbol, side="SELL", type="MARKET", quantity=qty)
+
+        # IMPORTANTE: esperamos a que Binance refleje la posición antes de
+        # enviar órdenes reduceOnly (evita APIError "Reduce-only order failed").
+        for _ in range(10):
+            try:
+                pos_info = client.futures_position_information(symbol=symbol)
+                pos_amt = float(pos_info[0]["positionAmt"]) if pos_info else 0.0
+                if pos_amt < 0:
+                    break
+            except Exception:
+                pass
+            time.sleep(0.2)
         
         take_profit_price = round_price(entry_price * (1 - tp_pct), symbol_info)
         stop_loss_price = round_price(entry_price * (1 + sl_pct), symbol_info)
