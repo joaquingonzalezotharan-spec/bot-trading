@@ -468,7 +468,24 @@ def main():
             )
             client.futures_cancel_all_open_orders(symbol=args.symbol)
 
-            client.futures_change_margin_type(symbol=args.symbol, marginType="ISOLATED")
+            try:
+                client.futures_change_margin_type(
+                    symbol=args.symbol,
+                    marginType="ISOLATED",
+                )
+            except BinanceAPIException as e:
+                code = getattr(e, "code", None)
+                if code is None and getattr(e, "args", None):
+                    code = e.args[0] if len(e.args) > 0 else None
+
+                # Binance devuelve -4046 cuando el tipo ya está configurado.
+                if code == -4046 or "No need to change margin type" in str(e):
+                    logger.warning(
+                        "[STARTUP] El tipo de margen ya estaba en ISOLATED. Continuando configuración de leverage..."
+                    )
+                else:
+                    raise
+
             client.futures_change_leverage(symbol=args.symbol, leverage=cfg.leverage)
         except BinanceAPIException as e:
             code = getattr(e, "code", None)
