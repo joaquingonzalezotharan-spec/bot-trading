@@ -253,72 +253,154 @@ def round_price(price: float, symbol_info: dict) -> float:
 # =====================================================================
 # EJECUCIÓN DE ÓRDENES (TP Maker LIMIT / SL Market)
 # =====================================================================
-def _place_long_with_stop(client: Client, symbol: str, qty: float, entry_price: float, sl_pct: float, tp_pct: float, symbol_info: dict):
+def _place_long_with_stop(
+    client: Client,
+    symbol: str,
+    qty: float,
+    entry_price: float,
+    sl_pct: float,
+    tp_pct: float,
+    symbol_info: dict,
+    proxies: dict | None = None,
+):
     try:
         logger.info(f"[ORDEN] Abriendo posición LONG en Market. Cantidad: {qty}")
-        client.futures_create_order(symbol=symbol, side="BUY", type="MARKET", quantity=qty)
+        market_order = client.futures_create_order(
+            symbol=symbol,
+            side="BUY",
+            type="MARKET",
+            quantity=qty,
+        )
+        exec_price = market_order.get("avgPrice") or market_order.get("avg_price") or entry_price
+        exec_price = float(exec_price)
 
         # IMPORTANTE: esperamos a que Binance refleje la posición antes de
         # enviar órdenes reduceOnly (evita APIError "Reduce-only order failed").
+        confirmed_pos_amt = 0.0
         for _ in range(10):
             try:
                 pos_info = client.futures_position_information(symbol=symbol)
                 pos_amt = float(pos_info[0]["positionAmt"]) if pos_info else 0.0
                 if pos_amt > 0:
+                    confirmed_pos_amt = pos_amt
                     break
             except Exception:
                 pass
             time.sleep(0.2)
         
+        if confirmed_pos_amt <= 0:
+            logger.warning("[ORDEN] No se confirmó positionAmt LONG antes de SL/TP; omitiendo notificación y órdenes reduceOnly.")
+            return
+        
         take_profit_price = round_price(entry_price * (1 + tp_pct), symbol_info)
         stop_loss_price = round_price(entry_price * (1 - sl_pct), symbol_info)
         
-        client.futures_create_order(
+        sl_order = client.futures_create_order(
             symbol=symbol, side="SELL", type="STOP_MARKET",
             stopPrice=stop_loss_price, reduceOnly=True, quantity=qty
         )
-        logger.info(f"[ORDEN] SL colocado en (STOP_MARKET): {stop_loss_price}")
+        sl_trigger_price = sl_order.get("stopPrice") or sl_order.get("stop_price") or stop_loss_price
+        sl_trigger_price = float(sl_trigger_price)
+        logger.info(f"[ORDEN] SL colocado en (STOP_MARKET): {sl_trigger_price}")
         
-        client.futures_create_order(
+        tp_order = client.futures_create_order(
             symbol=symbol, side="SELL", type="LIMIT",
             price=take_profit_price, timeInForce="GTC", reduceOnly=True, quantity=qty
         )
-        logger.info(f"[ORDEN] TP colocado en (LIMIT Maker GTC): {take_profit_price}")
+        tp_trigger_price = tp_order.get("price") or take_profit_price
+        tp_trigger_price = float(tp_trigger_price)
+        logger.info(f"[ORDEN] TP colocado en (LIMIT Maker GTC): {tp_trigger_price}")
+
+        # Notificación visual inmediata desde el móvil.
+        msg = (
+            "🚀 ¡OPERACIÓN ABIERTA Y BLINDADA!\n"
+            "• Tipo: LONG\n"
+            f"• Precio Entrada: {exec_price:.6f}\n"
+            f"• Tamaño: {confirmed_pos_amt}\n"
+            f"• 🎯 Take Profit (Nativo): {tp_trigger_price:.6f}\n"
+            f"• 🛑 Stop Loss (Nativo): {sl_trigger_price:.6f}\n"
+            "Nota: Asegúrate de extraer los precios de disparo reales devueltos por la respuesta de la API de Binance "
+            "para garantizar que el mensaje muestre los valores exactos que quedaron guardados en el libro de órdenes"
+        )
+        enviar_telegram(msg, proxies=proxies)
     except BinanceAPIException as e:
         logger.error(f"Error de Binance al ejecutar Long Setup: {e}")
-def _place_short_with_sl_tp(client: Client, symbol: str, qty: float, entry_price: float, sl_pct: float, tp_pct: float, symbol_info: dict):
+    except Exception as e:
+        logger.error(f"Error inesperado al ejecutar Long Setup: {e}", exc_info=True)
+def _place_short_with_sl_tp(
+    client: Client,
+    symbol: str,
+    qty: float,
+    entry_price: float,
+    sl_pct: float,
+    tp_pct: float,
+    symbol_info: dict,
+    proxies: dict | None = None,
+):
     try:
         logger.info(f"[ORDEN] Abriendo posición SHORT en Market. Cantidad: {qty}")
-        client.futures_create_order(symbol=symbol, side="SELL", type="MARKET", quantity=qty)
+        market_order = client.futures_create_order(
+            symbol=symbol,
+            side="SELL",
+            type="MARKET",
+            quantity=qty,
+        )
+        exec_price = market_order.get("avgPrice") or market_order.get("avg_price") or entry_price
+        exec_price = float(exec_price)
 
         # IMPORTANTE: esperamos a que Binance refleje la posición antes de
         # enviar órdenes reduceOnly (evita APIError "Reduce-only order failed").
+        confirmed_pos_amt = 0.0
         for _ in range(10):
             try:
                 pos_info = client.futures_position_information(symbol=symbol)
                 pos_amt = float(pos_info[0]["positionAmt"]) if pos_info else 0.0
                 if pos_amt < 0:
+                    confirmed_pos_amt = pos_amt
                     break
             except Exception:
                 pass
             time.sleep(0.2)
         
+        if confirmed_pos_amt >= 0:
+            logger.warning("[ORDEN] No se confirmó positionAmt SHORT antes de SL/TP; omitiendo notificación y órdenes reduceOnly.")
+            return
+        
         take_profit_price = round_price(entry_price * (1 - tp_pct), symbol_info)
         stop_loss_price = round_price(entry_price * (1 + sl_pct), symbol_info)
         
-        client.futures_create_order(
+        sl_order = client.futures_create_order(
             symbol=symbol, side="BUY", type="STOP_MARKET",
             stopPrice=stop_loss_price, reduceOnly=True, quantity=qty
         )
-        logger.info(f"[ORDEN] SL colocado en (STOP_MARKET): {stop_loss_price}")
+        sl_trigger_price = sl_order.get("stopPrice") or sl_order.get("stop_price") or stop_loss_price
+        sl_trigger_price = float(sl_trigger_price)
+        logger.info(f"[ORDEN] SL colocado en (STOP_MARKET): {sl_trigger_price}")
         
-        client.futures_create_order(
+        tp_order = client.futures_create_order(
             symbol=symbol, side="BUY", type="LIMIT",
             price=take_profit_price, timeInForce="GTC", reduceOnly=True, quantity=qty
         )
-        logger.info(f"[ORDEN] TP colocado en (LIMIT Maker GTC): {take_profit_price}")
+        tp_trigger_price = tp_order.get("price") or take_profit_price
+        tp_trigger_price = float(tp_trigger_price)
+        logger.info(f"[ORDEN] TP colocado en (LIMIT Maker GTC): {tp_trigger_price}")
+
+        # Notificación visual inmediata desde el móvil.
+        msg = (
+            "🚀 ¡OPERACIÓN ABIERTA Y BLINDADA!\n"
+            "• Tipo: SHORT\n"
+            f"• Precio Entrada: {exec_price:.6f}\n"
+            f"• Tamaño: {confirmed_pos_amt}\n"
+            f"• 🎯 Take Profit (Nativo): {tp_trigger_price:.6f}\n"
+            f"• 🛑 Stop Loss (Nativo): {sl_trigger_price:.6f}\n"
+            "Nota: Asegúrate de extraer los precios de disparo reales devueltos por la respuesta de la API de Binance "
+            "para garantizar que el mensaje muestre los valores exactos que quedaron guardados en el libro de órdenes"
+        )
+        enviar_telegram(msg, proxies=proxies)
     except BinanceAPIException as e:
         logger.error(f"Error de Binance al ejecutar Short Setup: {e}")
+    except Exception as e:
+        logger.error(f"Error inesperado al ejecutar Short Setup: {e}", exc_info=True)
 # =====================================================================
 # LOOP PRINCIPAL Y ARRANQUE
 # =====================================================================
@@ -615,6 +697,7 @@ def main():
                         sl_pct,
                         tp_pct,
                         symbol_info,
+                        proxies=requests_params.get("proxies"),
                     )
             elif is_alcista and volume_ok and current_rsi <= cfg.bullish_rsi_entry:
                 sl_pct = cfg.sl_bullish_pct
@@ -636,6 +719,7 @@ def main():
                         sl_pct,
                         tp_pct,
                         symbol_info,
+                        proxies=requests_params.get("proxies"),
                     )
             elif is_bajista and volume_ok and current_rsi >= cfg.bearish_rsi_entry:
                 sl_pct = cfg.sl_bearish_pct
@@ -657,6 +741,7 @@ def main():
                         sl_pct,
                         tp_pct,
                         symbol_info,
+                        proxies=requests_params.get("proxies"),
                     )
 
             time.sleep(60)
