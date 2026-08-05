@@ -487,6 +487,16 @@ def main():
                     raise
 
             client.futures_change_leverage(symbol=args.symbol, leverage=cfg.leverage)
+            
+            try:
+                # False significa "One-Way Mode" (Modo Unidireccional)
+                client.futures_change_position_mode(dualSidePosition="False")
+                print("[STARTUP] Modo de posición configurado a Unidireccional.")
+            except Exception as e:
+                if "No need to change position side" in str(e) or "-4059" in str(e):
+                    print("[STARTUP] El modo de posición ya era Unidireccional. Continuando...")
+                else:
+                    print(f"[WARNING] No se pudo cambiar el modo de posición: {e}")
         except BinanceAPIException as e:
             code = getattr(e, "code", None)
             if code is None and getattr(e, "args", None):
@@ -627,12 +637,9 @@ def main():
             # 4) Verificar posición activa
             pos_info = client.futures_position_information(symbol=args.symbol)
             # Obtener el valor bruto de la API de Binance
-            raw_position_amt = float(pos_info[0]["positionAmt"]) if pos_info else 0.0
+            raw_amt = float(pos_info[0]["positionAmt"]) if pos_info else 0.0
             # Aplicar umbral de seguridad: si es menor a 0.001 BTC, forzar a 0.0
-            if abs(raw_position_amt) < 0.001:
-                position_amt = 0.0
-            else:
-                position_amt = raw_position_amt
+            position_amt = raw_amt if abs(raw_amt) >= 0.001 else 0.0
             position_amt = get_effective_position_amt(
                 client,
                 args.symbol,
