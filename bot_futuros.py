@@ -748,15 +748,15 @@ def main():
         # HARD RESET (hard recompute): reiniciar PnL mensual desde 0.00
         monthly_net_pnl = 0.0
         for t in month_trades or []:
-            try:
-                t_time_ms = int(t.get("time", 0) or 0)
-                if t_time_ms < month_start_ms or t_time_ms > now_ms:
-                    continue
-                # PnL neto = realizedPnl - commission (Binance Futuros)
-                net_pnl_trade = float(t["realizedPnl"]) - float(t["commission"])
-                monthly_net_pnl += net_pnl_trade
-            except Exception:
+            t_time_ms = int(t.get("time", 0) or 0)
+            if t_time_ms < month_start_ms or t_time_ms > now_ms:
                 continue
+
+            realized_pnl = float(t.get("realizedPnl", 0.0) or 0.0)
+            commission = float(t.get("commission", 0.0) or 0.0)
+            # PnL neto = realizedPnl - commission (Binance Futuros)
+            net_pnl_trade = realized_pnl - commission
+            monthly_net_pnl += net_pnl_trade
 
         emoji_resultado = "🟢" if net_pnl >= 0 else "🔴"
         fecha_ayer_str = yesterday_date.strftime("%d/%m/%Y")
