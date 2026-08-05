@@ -632,6 +632,8 @@ def main():
         ejecutar_auditoria_historica()
 
     had_position = False
+    checked_orders_for_position = False
+    has_reduce_sl_tp_cached = True
     
     def send_daily_pnl_report() -> None:
         # Reporte para "ayer completo" en hora local del servidor.
@@ -703,6 +705,53 @@ def main():
         perdidas_brutas = sum(p for p in realized_pnls if p < 0)
         net_pnl = ganancias_brutas + perdidas_brutas
 
+        # PnL mensual (mes en curso) - Opción B
+        month_start_dt = datetime(
+            now_local.year,
+            now_local.month,
+            1,
+            0,
+            0,
+            0,
+            tzinfo=now_local.tzinfo,
+        )
+        month_start_ms = int(month_start_dt.timestamp() * 1000)
+        now_ms = int(now_local.timestamp() * 1000)
+
+        month_trades: list[dict] = []
+        fetch_month_start_ms = month_start_ms
+        while True:
+            month_batch = client.futures_account_trades(
+                symbol="BTCUSDT",
+                startTime=fetch_month_start_ms,
+                endTime=now_ms,
+                limit=1000,
+            )
+            if not month_batch:
+                break
+
+            month_trades.extend(month_batch)
+
+            last_time = month_batch[-1].get("time")
+            if last_time is None:
+                break
+
+            last_time_ms = int(last_time)
+            if last_time_ms >= now_ms:
+                break
+
+            fetch_month_start_ms = last_time_ms + 1
+
+            if len(month_batch) < 1000:
+                break
+
+        monthly_net_pnl = 0.0
+        for t in month_trades or []:
+            try:
+                monthly_net_pnl += float(t.get("realizedPnl", 0.0) or 0.0)
+            except Exception:
+                continue
+
         emoji_resultado = "🟢" if net_pnl >= 0 else "🔴"
         fecha_ayer_str = yesterday_date.strftime("%d/%m/%Y")
 
@@ -712,7 +761,8 @@ def main():
             f"🔄 *Operaciones cerradas:* {operaciones_cerradas}\n"
             f"🟢 *Ganancias brutas:* {ganancias_brutas:+.2f} USDT\n"
             f"🔴 *Pérdidas brutas:* {perdidas_brutas:.2f} USDT\n"
-            f"🎚️ *Resultado Neto:* {emoji_resultado} {net_pnl:+.2f} USDT"
+            f"🎚️ *Resultado Neto:* {emoji_resultado} {net_pnl:+.2f} USDT\n"
+            f"📅 *PNL Mensual (Mes actual):* {monthly_net_pnl:+.2f} USDT"
         )
 
         send_telegram_alert(mensaje_reporte_diario)
@@ -810,6 +860,8 @@ def main():
                 )
                 send_telegram_alert(mensaje_cierre)
                 had_position = False
+                checked_orders_for_position = False
+                has_reduce_sl_tp_cached = True
 
             # Reporte a Telegram cada 2 horas (exacto por timestamp, con re-sincronización).
             now_ts = time.time()
@@ -890,18 +942,21 @@ def main():
                 logger.info(f"[LIVE] Posición ya activa (positionAmt={position_amt}). No abro una nueva.")
                 # Salvavidas: si por reinicio/no-ejecución Binance no dejó SL/TP,
                 # cerramos por MARKET cuando se alcance TP o se rompa SL.
-                try:
-                    open_orders = client.futures_get_open_orders(symbol=args.symbol)
-                except Exception:
-                    open_orders = []
+                if not checked_orders_for_position:
+                    try:
+                        open_orders = client.futures_get_open_orders(symbol=args.symbol)
+                    except Exception:
+                        open_orders = []
 
-                has_reduce_sl_tp = False
-                for o in (open_orders or []):
-                    if o.get("reduceOnly") and o.get("type") in ("STOP_MARKET", "LIMIT"):
-                        has_reduce_sl_tp = True
-                        break
+                    has_reduce_sl_tp_cached = False
+                    for o in (open_orders or []):
+                        if o.get("reduceOnly") and o.get("type") in ("STOP_MARKET", "LIMIT"):
+                            has_reduce_sl_tp_cached = True
+                            break
 
-                if not has_reduce_sl_tp:
+                    checked_orders_for_position = True
+
+                if not has_reduce_sl_tp_cached:
                     entry_price_val = None
                     try:
                         entry_price_val = pos_info[0].get("entryPrice") or pos_info[0].get("entry_price")
@@ -960,80 +1015,77 @@ def main():
                                     )
                                 except Exception as e:
                                     logger.warning(f"[EMERGENCIA] Falló cierre SHORT: {e}", exc_info=True)
+            else:
+                # Evitar órdenes huérfanas: cancelamos las existentes antes de abrir
+                client.futures_cancel_all_open_orders(symbol=args.symbol)
 
-                time.sleep(15)
-                continue
-
-            # Evitar órdenes huérfanas: cancelamos las existentes antes de abrir
-            client.futures_cancel_all_open_orders(symbol=args.symbol)
-
-            # 5) Reglas de entrada
-            if is_lateral and volume_ok and current_rsi <= cfg.lateral_rsi_entry:
-                sl_pct = cfg.sl_lateral_pct
-                tp_pct = cfg.tp_lateral_pct
-                qty = calculate_qty_fixed_risk(
-                    client=client,
-                    symbol=args.symbol,
-                    entry_price=current_close,
-                    sl_pct=sl_pct,
-                    cfg=cfg,
-                )
-                logger.info(f"[ENTRY] LATERAL->LONG qty={qty} sl_pct={sl_pct} tp_pct={tp_pct}")
-                if qty > 0:
-                    _place_long_with_stop(
-                        client,
-                        args.symbol,
-                        qty,
-                        current_close,
-                        sl_pct,
-                        tp_pct,
-                        symbol_info,
-                        proxies=requests_params.get("proxies"),
+                # 5) Reglas de entrada
+                if is_lateral and volume_ok and current_rsi <= cfg.lateral_rsi_entry:
+                    sl_pct = cfg.sl_lateral_pct
+                    tp_pct = cfg.tp_lateral_pct
+                    qty = calculate_qty_fixed_risk(
+                        client=client,
+                        symbol=args.symbol,
+                        entry_price=current_close,
+                        sl_pct=sl_pct,
+                        cfg=cfg,
                     )
-            elif is_alcista and volume_ok and current_rsi <= cfg.bullish_rsi_entry:
-                sl_pct = cfg.sl_bullish_pct
-                tp_pct = cfg.tp_bullish_pct
-                qty = calculate_qty_fixed_risk(
-                    client=client,
-                    symbol=args.symbol,
-                    entry_price=current_close,
-                    sl_pct=sl_pct,
-                    cfg=cfg,
-                )
-                logger.info(f"[ENTRY] ALCISTA->LONG qty={qty} sl_pct={sl_pct} tp_pct={tp_pct}")
-                if qty > 0:
-                    _place_long_with_stop(
-                        client,
-                        args.symbol,
-                        qty,
-                        current_close,
-                        sl_pct,
-                        tp_pct,
-                        symbol_info,
-                        proxies=requests_params.get("proxies"),
+                    logger.info(f"[ENTRY] LATERAL->LONG qty={qty} sl_pct={sl_pct} tp_pct={tp_pct}")
+                    if qty > 0:
+                        _place_long_with_stop(
+                            client,
+                            args.symbol,
+                            qty,
+                            current_close,
+                            sl_pct,
+                            tp_pct,
+                            symbol_info,
+                            proxies=requests_params.get("proxies"),
+                        )
+                elif is_alcista and volume_ok and current_rsi <= cfg.bullish_rsi_entry:
+                    sl_pct = cfg.sl_bullish_pct
+                    tp_pct = cfg.tp_bullish_pct
+                    qty = calculate_qty_fixed_risk(
+                        client=client,
+                        symbol=args.symbol,
+                        entry_price=current_close,
+                        sl_pct=sl_pct,
+                        cfg=cfg,
                     )
-            elif is_bajista and volume_ok and current_rsi >= cfg.bearish_rsi_entry:
-                sl_pct = cfg.sl_bearish_pct
-                tp_pct = cfg.tp_bearish_pct
-                qty = calculate_qty_fixed_risk(
-                    client=client,
-                    symbol=args.symbol,
-                    entry_price=current_close,
-                    sl_pct=sl_pct,
-                    cfg=cfg,
-                )
-                logger.info(f"[ENTRY] BAJISTA->SHORT qty={qty} sl_pct={sl_pct} tp_pct={tp_pct}")
-                if qty > 0:
-                    _place_short_with_sl_tp(
-                        client,
-                        args.symbol,
-                        qty,
-                        current_close,
-                        sl_pct,
-                        tp_pct,
-                        symbol_info,
-                        proxies=requests_params.get("proxies"),
+                    logger.info(f"[ENTRY] ALCISTA->LONG qty={qty} sl_pct={sl_pct} tp_pct={tp_pct}")
+                    if qty > 0:
+                        _place_long_with_stop(
+                            client,
+                            args.symbol,
+                            qty,
+                            current_close,
+                            sl_pct,
+                            tp_pct,
+                            symbol_info,
+                            proxies=requests_params.get("proxies"),
+                        )
+                elif is_bajista and volume_ok and current_rsi >= cfg.bearish_rsi_entry:
+                    sl_pct = cfg.sl_bearish_pct
+                    tp_pct = cfg.tp_bearish_pct
+                    qty = calculate_qty_fixed_risk(
+                        client=client,
+                        symbol=args.symbol,
+                        entry_price=current_close,
+                        sl_pct=sl_pct,
+                        cfg=cfg,
                     )
+                    logger.info(f"[ENTRY] BAJISTA->SHORT qty={qty} sl_pct={sl_pct} tp_pct={tp_pct}")
+                    if qty > 0:
+                        _place_short_with_sl_tp(
+                            client,
+                            args.symbol,
+                            qty,
+                            current_close,
+                            sl_pct,
+                            tp_pct,
+                            symbol_info,
+                            proxies=requests_params.get("proxies"),
+                        )
 
             time.sleep(15)
         except KeyboardInterrupt:
