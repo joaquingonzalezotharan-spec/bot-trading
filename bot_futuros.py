@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 # RIESGO FIJO POR OPERACIÓN (USD)
 # =====================================================================
 # Pérdida máxima fija estimada en USD por operación (bajo el SL configurado).
-RISK_PER_TRADE = 7.5  # Ajustado para optimizar ganancias sobre balance real
+RISK_PER_TRADE = 7.5
 
 
 def calculate_qty_fixed_risk(
