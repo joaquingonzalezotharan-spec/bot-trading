@@ -448,6 +448,7 @@ def main():
         f"[BOT INICIADO] symbol={args.symbol} | interval={args.interval} | leverage={cfg.leverage}x",
         proxies=requests_params.get("proxies"),
     )
+    bot_start_ts_ms = int(time.time() * 1000)
     
     logger.info(f"=== Inicializando bot para {args.symbol} ===")
     
@@ -580,6 +581,55 @@ def main():
     
     def send_telegram_alert(mensaje: str) -> None:
         enviar_telegram(mensaje, proxies=requests_params.get("proxies"))
+
+    def ejecutar_auditoria_historica() -> None:
+        # Historial (últimos 1000 trades) sin restricciones de días.
+        trades = client.futures_account_trades(symbol="BTCUSDT", limit=1000)
+
+        total_operaciones_cerradas = 0
+        ganancias_acumuladas = 0.0
+        perdidas_acumuladas = 0.0
+        balance_neto_total = 0.0
+
+        for t in trades or []:
+            try:
+                t_time_ms = int(t.get("time", 0) or 0)
+            except Exception:
+                t_time_ms = 0
+
+            if t_time_ms < bot_start_ts_ms:
+                continue
+
+            try:
+                pnl = float(t.get("realizedPnl", 0.0) or 0.0)
+            except Exception:
+                pnl = 0.0
+
+            if pnl == 0.0:
+                continue
+
+            total_operaciones_cerradas += 1
+            balance_neto_total += pnl
+            if pnl >= 0:
+                ganancias_acumuladas += pnl
+            else:
+                perdidas_acumuladas += pnl
+
+        emoji_resultado = "🟢" if balance_neto_total >= 0 else "🔴"
+        mensaje_auditoria = (
+            "🏆 *Bot Futuros: Balance Histórico Total*\n"
+            "🚀 *Desde el inicio de operaciones hasta hoy*\n"
+            f"🔄 *Total operaciones cerradas:* {total_operaciones_cerradas}\n"
+            f"💰 *Ganancias acumuladas:* {ganancias_acumuladas:+.2f} USDT\n"
+            f"💸 *Pérdidas acumuladas:* {perdidas_acumuladas:.2f} USDT\n"
+            f"⚖️ *BALANCE NETO TOTAL:* {emoji_resultado} {balance_neto_total:+.2f} USDT"
+        )
+
+        send_telegram_alert(mensaje_auditoria)
+
+    if os.environ.get("AUDIT_HISTORICA") == "1":
+        print("[AUDITORIA] Ejecutando auditoría histórica bajo demanda...")
+        ejecutar_auditoria_historica()
 
     had_position = False
     
