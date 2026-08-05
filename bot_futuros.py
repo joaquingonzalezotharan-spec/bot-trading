@@ -576,6 +576,11 @@ def main():
 
         enviar_telegram(msg, proxies=requests_params.get("proxies"))
     
+    def send_telegram_alert(mensaje: str) -> None:
+        enviar_telegram(mensaje, proxies=requests_params.get("proxies"))
+
+    had_position = False
+    
     # Intervalo mecánico fijo
     while True:
         try:
@@ -646,6 +651,28 @@ def main():
                 position_amt=position_amt,
                 lookback_seconds=180,
             )
+
+            # Alerta de cierre con PNL realizado (cuando pasamos de posición activa a posición=0)
+            if abs(position_amt) > 0:
+                had_position = True
+            elif had_position and abs(position_amt) == 0:
+                pnl_realizado = 0.0  # Extrae aquí el PNL del último trade cerrado de Binance
+                try:
+                    trades = client.futures_account_trades(symbol="BTCUSDT", limit=5)
+                    if trades:
+                        pnl_realizado = float(trades[0].get("realizedPnl", 0.0) or 0.0)
+                except Exception:
+                    pnl_realizado = 0.0
+
+                emoji_resultado = "🟢" if pnl_realizado >= 0 else "🔴"
+                signo = "+" if pnl_realizado >= 0 else ""
+                mensaje_cierre = (
+                    f"🏁 *Bot Futuros: Posición Cerrada*\n\n"
+                    f"📊 *Resultado:* {emoji_resultado} Net PNL: {signo}{pnl_realizado:.2f} USDT\n"
+                    f"🔒 *Estado de Cuenta:* Limpia y en cero, escaneando el mercado cada 15 segundos..."
+                )
+                send_telegram_alert(mensaje_cierre)
+                had_position = False
 
             # Reporte a Telegram cada 2 horas (exacto por timestamp, con re-sincronización).
             now_ts = time.time()
