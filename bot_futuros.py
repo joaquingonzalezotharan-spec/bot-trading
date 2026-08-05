@@ -4,6 +4,7 @@ import argparse
 import logging
 import math
 import sys
+from datetime import datetime, timedelta
 from urllib.parse import quote
 import pandas as pd
 import numpy as np
@@ -581,6 +582,101 @@ def main():
 
     had_position = False
     
+    def send_daily_pnl_report() -> None:
+        # Reporte para "ayer completo" en hora local del servidor.
+        now_local = datetime.now().astimezone()
+        yesterday_date = (now_local - timedelta(days=1)).date()
+        start_dt = datetime(
+            yesterday_date.year,
+            yesterday_date.month,
+            yesterday_date.day,
+            0,
+            0,
+            0,
+            tzinfo=now_local.tzinfo,
+        )
+        end_dt = datetime(
+            yesterday_date.year,
+            yesterday_date.month,
+            yesterday_date.day,
+            23,
+            59,
+            59,
+            tzinfo=now_local.tzinfo,
+        )
+
+        start_ms = int(start_dt.timestamp() * 1000)
+        end_ms = int(end_dt.timestamp() * 1000)
+
+        # Consumimos todos los trades del rango usando paginación por timestamp.
+        all_trades: list[dict] = []
+        fetch_start_ms = start_ms
+        while True:
+            batch = client.futures_account_trades(
+                symbol="BTCUSDT",
+                startTime=fetch_start_ms,
+                endTime=end_ms,
+                limit=1000,
+            )
+            if not batch:
+                break
+
+            all_trades.extend(batch)
+
+            last_time = batch[-1].get("time")
+            if last_time is None:
+                break
+
+            last_time_ms = int(last_time)
+            if last_time_ms >= end_ms:
+                break
+
+            # Siguiente página: avanzar 1ms para no repetir el último trade.
+            fetch_start_ms = last_time_ms + 1
+
+            # Si el batch ya vino "corto", no hay más páginas.
+            if len(batch) < 1000:
+                break
+
+        realized_pnls: list[float] = []
+        for t in all_trades:
+            try:
+                rp = float(t.get("realizedPnl", 0.0) or 0.0)
+            except Exception:
+                rp = 0.0
+            if rp != 0.0:
+                realized_pnls.append(rp)
+
+        operaciones_cerradas = len(realized_pnls)
+        ganancias_brutas = sum(p for p in realized_pnls if p > 0)
+        perdidas_brutas = sum(p for p in realized_pnls if p < 0)
+        net_pnl = ganancias_brutas + perdidas_brutas
+
+        emoji_resultado = "🟢" if net_pnl >= 0 else "🔴"
+        fecha_ayer_str = yesterday_date.strftime("%d/%m/%Y")
+
+        mensaje_reporte_diario = (
+            "📊 *Bot Futuros: Reporte Diario de Rendimiento*\n"
+            f"📆 *Período analizado:* {fecha_ayer_str}\n"
+            f"🔄 *Operaciones cerradas:* {operaciones_cerradas}\n"
+            f"🟢 *Ganancias brutas:* {ganancias_brutas:+.2f} USDT\n"
+            f"🔴 *Pérdidas brutas:* {perdidas_brutas:.2f} USDT\n"
+            f"🎚️ *Resultado Neto:* {emoji_resultado} {net_pnl:+.2f} USDT"
+        )
+
+        send_telegram_alert(mensaje_reporte_diario)
+
+    now_local_start = datetime.now().astimezone()
+    daily_target_dt = now_local_start.replace(
+        hour=6,
+        minute=25,
+        second=0,
+        microsecond=0,
+    )
+    if now_local_start >= daily_target_dt:
+        daily_target_dt = daily_target_dt + timedelta(days=1)
+    next_daily_report_ts = int(daily_target_dt.timestamp())
+    
     # Intervalo mecánico fijo
     while True:
         try:
@@ -659,8 +755,9 @@ def main():
                 pnl_realizado = 0.0  # Extrae aquí el PNL del último trade cerrado de Binance
                 try:
                     trades = client.futures_account_trades(symbol="BTCUSDT", limit=5)
-                    if trades:
-                        pnl_realizado = float(trades[0].get("realizedPnl", 0.0) or 0.0)
+                    ultimo_trade = trades[0] if trades else None
+                    if ultimo_trade:
+                        pnl_realizado = float(ultimo_trade["realizedPnl"])
                 except Exception:
                     pnl_realizado = 0.0
 
@@ -676,6 +773,13 @@ def main():
 
             # Reporte a Telegram cada 2 horas (exacto por timestamp, con re-sincronización).
             now_ts = time.time()
+            if now_ts >= next_daily_report_ts:
+                try:
+                    send_daily_pnl_report()
+                except Exception as e:
+                    logger.warning(f"[TELEGRAM] Error enviando reporte diario: {e}", exc_info=True)
+                daily_target_dt = daily_target_dt + timedelta(days=1)
+                next_daily_report_ts = int(daily_target_dt.timestamp())
             if now_ts >= next_report_ts:
                 try:
                     if abs(position_amt) > 0:
