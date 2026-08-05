@@ -626,9 +626,13 @@ def main():
 
             # 4) Verificar posición activa
             pos_info = client.futures_position_information(symbol=args.symbol)
-            position_amt = float(pos_info[0]["positionAmt"]) if pos_info else 0.0
-            # Ignorar micro-saldos residuales que bloquean aperturas.
-            position_amt = position_amt if abs(position_amt) >= 0.001 else 0.0
+            # Obtener el valor bruto de la API de Binance
+            raw_position_amt = float(pos_info[0]["positionAmt"]) if pos_info else 0.0
+            # Aplicar umbral de seguridad: si es menor a 0.001 BTC, forzar a 0.0
+            if abs(raw_position_amt) < 0.001:
+                position_amt = 0.0
+            else:
+                position_amt = raw_position_amt
             position_amt = get_effective_position_amt(
                 client,
                 args.symbol,
