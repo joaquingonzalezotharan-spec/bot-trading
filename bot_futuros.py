@@ -661,7 +661,8 @@ def main():
     
     def send_daily_pnl_report() -> None:
         # Reporte para "ayer completo" en hora local del servidor.
-        now_local = datetime.now().astimezone()
+        zona_local = pytz.timezone('America/Argentina/Buenos_Aires')
+        now_local = datetime.now(zona_local)
         yesterday_date = (now_local - timedelta(days=1)).date()
         start_dt = datetime(
             yesterday_date.year,
@@ -729,8 +730,8 @@ def main():
         perdidas_brutas = sum(p for p in realized_pnls if p < 0)
         net_pnl = ganancias_brutas + perdidas_brutas
 
-        # PnL "mensual" pero con inicio HARD en HOY (ignora histórico previo).
-        # Esto evita PnL viejo/anticuado que aparece en el reporte inicial.
+        # PnL "mensual" pero con inicio HARD: desde el arranque de esta versión
+        # (bot_start_ts_ms) o desde HOY 00:00 (lo que ocurra DESPUÉS).
         start_today_dt = datetime(
             now_local.year,
             now_local.month,
@@ -740,7 +741,8 @@ def main():
             0,
             tzinfo=now_local.tzinfo,
         )
-        month_start_ms = int(start_today_dt.timestamp() * 1000)
+        start_today_ms = int(start_today_dt.timestamp() * 1000)
+        month_start_ms = max(bot_start_ts_ms, start_today_ms)
         now_ms = int(now_local.timestamp() * 1000)
 
         month_trades: list[dict] = []
@@ -1055,7 +1057,7 @@ def main():
                 if is_lateral and volume_ok and current_rsi <= cfg.lateral_rsi_entry:
                     sl_pct = cfg.sl_lateral_pct
                     tp_pct = cfg.tp_lateral_pct
-                    qty = 0.016
+                    qty = 0.015
                     logger.info(f"[ENTRY] LATERAL->LONG qty={qty} sl_pct={sl_pct} tp_pct={tp_pct}")
                     if qty > 0:
                         _place_long_with_stop(
@@ -1071,7 +1073,7 @@ def main():
                 elif is_alcista and volume_ok and current_rsi <= cfg.bullish_rsi_entry:
                     sl_pct = cfg.sl_bullish_pct
                     tp_pct = cfg.tp_bullish_pct
-                    qty = 0.016
+                    qty = 0.015
                     logger.info(f"[ENTRY] ALCISTA->LONG qty={qty} sl_pct={sl_pct} tp_pct={tp_pct}")
                     if qty > 0:
                         _place_long_with_stop(
@@ -1087,7 +1089,7 @@ def main():
                 elif is_bajista and volume_ok and current_rsi >= cfg.bearish_rsi_entry:
                     sl_pct = cfg.sl_bearish_pct
                     tp_pct = cfg.tp_bearish_pct
-                    qty = 0.016
+                    qty = 0.015
                     logger.info(f"[ENTRY] BAJISTA->SHORT qty={qty} sl_pct={sl_pct} tp_pct={tp_pct}")
                     if qty > 0:
                         _place_short_with_sl_tp(
