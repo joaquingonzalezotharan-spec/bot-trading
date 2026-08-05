@@ -729,17 +729,18 @@ def main():
         perdidas_brutas = sum(p for p in realized_pnls if p < 0)
         net_pnl = ganancias_brutas + perdidas_brutas
 
-        # PnL mensual (mes en curso) - Opción B
-        month_start_dt = datetime(
+        # PnL "mensual" pero con inicio HARD en HOY (ignora histórico previo).
+        # Esto evita PnL viejo/anticuado que aparece en el reporte inicial.
+        start_today_dt = datetime(
             now_local.year,
             now_local.month,
-            1,
+            now_local.day,
             0,
             0,
             0,
             tzinfo=now_local.tzinfo,
         )
-        month_start_ms = int(month_start_dt.timestamp() * 1000)
+        month_start_ms = int(start_today_dt.timestamp() * 1000)
         now_ms = int(now_local.timestamp() * 1000)
 
         month_trades: list[dict] = []
