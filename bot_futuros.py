@@ -748,7 +748,9 @@ def main():
         monthly_net_pnl = 0.0
         for t in month_trades or []:
             try:
-                monthly_net_pnl += float(t.get("realizedPnl", 0.0) or 0.0)
+                # PnL neto = realizedPnl - commission (Binance Futuros)
+                net_pnl = float(t["realizedPnl"]) - float(t["commission"])
+                monthly_net_pnl += net_pnl
             except Exception:
                 continue
 
