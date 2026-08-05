@@ -200,6 +200,8 @@ def prepare_indicators(df: pd.DataFrame, cfg: StrategyConfig) -> pd.DataFrame:
 
     # Filtro de volumen: promedio de las últimas 20 velas.
     df["vol_avg20"] = df["volume"].rolling(20).mean()
+    # Filtro de volumen alternativo para régimen lateral (más sensible a rangos cortos).
+    df["vol_avg5"] = df["volume"].rolling(5).mean()
     
     return df
 # =====================================================================
@@ -845,11 +847,13 @@ def main():
             current_rsi = float(last_row["rsi"])
             current_volume = float(last_row["volume"])
             vol_avg20 = float(last_row["vol_avg20"])
+            vol_avg5 = float(last_row["vol_avg5"])
 
             is_alcista = regime == "ALCISTA"
             is_bajista = regime == "BAJISTA"
             is_lateral = regime == "LATERAL"
-            volume_ok = np.isfinite(vol_avg20) and current_volume >= (vol_avg20 * 0.5)
+            vol_ref = vol_avg5 if is_lateral else vol_avg20
+            volume_ok = np.isfinite(vol_ref) and current_volume >= (vol_ref * 0.5)
             print(
                 f"[LIVE] Revisando mercado real... "
                 f"Régimen detectado: ALCISTA ({is_alcista}) / BAJISTA ({is_bajista}) / LATERAL ({is_lateral}) | "
@@ -1002,10 +1006,10 @@ def main():
                         if position_amt > 0:
                             # LONG: TP = entry*(1+tp), SL = entry*(1-sl)
                             if regime == "ALCISTA":
-                                tp_pct = cfg.tp_bullish_pct
+                                tp_pct = cfg.tp_bullish_pct * 1.2
                                 sl_pct = cfg.sl_bullish_pct
                             else:
-                                tp_pct = cfg.tp_lateral_pct
+                                tp_pct = cfg.tp_lateral_pct * 0.8
                                 sl_pct = cfg.sl_lateral_pct
 
                             tp_hit = current_close >= (entry_price_val * (1 + tp_pct))
@@ -1028,7 +1032,7 @@ def main():
                                     logger.warning(f"[EMERGENCIA] Falló cierre LONG: {e}", exc_info=True)
                         else:
                             # SHORT: TP = entry*(1-tp), SL = entry*(1+sl)
-                            tp_pct = cfg.tp_bearish_pct
+                            tp_pct = cfg.tp_bearish_pct * 1.2
                             sl_pct = cfg.sl_bearish_pct
 
                             tp_hit = current_close <= (entry_price_val * (1 - tp_pct))
@@ -1056,7 +1060,7 @@ def main():
                 # 5) Reglas de entrada
                 if is_lateral and volume_ok and current_rsi <= cfg.lateral_rsi_entry:
                     sl_pct = cfg.sl_lateral_pct
-                    tp_pct = cfg.tp_lateral_pct
+                    tp_pct = cfg.tp_lateral_pct * 0.8
                     qty = 0.015
                     logger.info(f"[ENTRY] LATERAL->LONG qty={qty} sl_pct={sl_pct} tp_pct={tp_pct}")
                     if qty > 0:
@@ -1072,7 +1076,7 @@ def main():
                         )
                 elif is_alcista and volume_ok and current_rsi <= cfg.bullish_rsi_entry:
                     sl_pct = cfg.sl_bullish_pct
-                    tp_pct = cfg.tp_bullish_pct
+                    tp_pct = cfg.tp_bullish_pct * 1.2
                     qty = 0.015
                     logger.info(f"[ENTRY] ALCISTA->LONG qty={qty} sl_pct={sl_pct} tp_pct={tp_pct}")
                     if qty > 0:
@@ -1088,7 +1092,7 @@ def main():
                         )
                 elif is_bajista and volume_ok and current_rsi >= cfg.bearish_rsi_entry:
                     sl_pct = cfg.sl_bearish_pct
-                    tp_pct = cfg.tp_bearish_pct
+                    tp_pct = cfg.tp_bearish_pct * 1.2
                     qty = 0.015
                     logger.info(f"[ENTRY] BAJISTA->SHORT qty={qty} sl_pct={sl_pct} tp_pct={tp_pct}")
                     if qty > 0:
