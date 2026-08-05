@@ -745,9 +745,13 @@ def main():
             if len(month_batch) < 1000:
                 break
 
+        # HARD RESET (hard recompute): reiniciar PnL mensual desde 0.00
         monthly_net_pnl = 0.0
         for t in month_trades or []:
             try:
+                t_time_ms = int(t.get("time", 0) or 0)
+                if t_time_ms < month_start_ms or t_time_ms > now_ms:
+                    continue
                 # PnL neto = realizedPnl - commission (Binance Futuros)
                 net_pnl_trade = float(t["realizedPnl"]) - float(t["commission"])
                 monthly_net_pnl += net_pnl_trade
