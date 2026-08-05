@@ -449,6 +449,30 @@ def main():
         proxies=requests_params.get("proxies"),
     )
     bot_start_ts_ms = int(time.time() * 1000)
+
+    def hard_reset_monthly_pnl_cache() -> None:
+        # Seguridad anti-persistencia física (caché viejo corrupto).
+        # Borra archivos locales típicos si existieran.
+        cache_candidates = [
+            "pnl_monthly_cache.json",
+            "pnl_monthly_cache.csv",
+            "pnl_monthly_cache.txt",
+            "monthly_pnl_cache.json",
+            "monthly_pnl_cache.csv",
+            "monthly_pnl_cache.txt",
+            "pnl_cache.json",
+            "pnl_cache.csv",
+            "pnl_cache.txt",
+        ]
+        for fn in cache_candidates:
+            try:
+                if os.path.exists(fn):
+                    os.remove(fn)
+            except Exception:
+                # Nunca romper el bot por una limpieza de caché.
+                pass
+
+    hard_reset_monthly_pnl_cache()
     
     logger.info(f"=== Inicializando bot para {args.symbol} ===")
     
