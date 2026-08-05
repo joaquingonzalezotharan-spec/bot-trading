@@ -846,6 +846,7 @@ def main():
             elif had_position and abs(position_amt) == 0:
                 pnl_realizado = 0.0  # Extrae aquí el PNL del último trade cerrado de Binance
                 try:
+                    time.sleep(2)
                     trades = client.futures_account_trades(symbol="BTCUSDT", limit=5)
                     ultimo_trade = trades[0] if trades else None
                     if ultimo_trade:
@@ -1025,13 +1026,7 @@ def main():
                 if is_lateral and volume_ok and current_rsi <= cfg.lateral_rsi_entry:
                     sl_pct = cfg.sl_lateral_pct
                     tp_pct = cfg.tp_lateral_pct
-                    qty = calculate_qty_fixed_risk(
-                        client=client,
-                        symbol=args.symbol,
-                        entry_price=current_close,
-                        sl_pct=sl_pct,
-                        cfg=cfg,
-                    )
+                    qty = 0.015
                     logger.info(f"[ENTRY] LATERAL->LONG qty={qty} sl_pct={sl_pct} tp_pct={tp_pct}")
                     if qty > 0:
                         _place_long_with_stop(
@@ -1047,13 +1042,7 @@ def main():
                 elif is_alcista and volume_ok and current_rsi <= cfg.bullish_rsi_entry:
                     sl_pct = cfg.sl_bullish_pct
                     tp_pct = cfg.tp_bullish_pct
-                    qty = calculate_qty_fixed_risk(
-                        client=client,
-                        symbol=args.symbol,
-                        entry_price=current_close,
-                        sl_pct=sl_pct,
-                        cfg=cfg,
-                    )
+                    qty = 0.015
                     logger.info(f"[ENTRY] ALCISTA->LONG qty={qty} sl_pct={sl_pct} tp_pct={tp_pct}")
                     if qty > 0:
                         _place_long_with_stop(
@@ -1069,13 +1058,7 @@ def main():
                 elif is_bajista and volume_ok and current_rsi >= cfg.bearish_rsi_entry:
                     sl_pct = cfg.sl_bearish_pct
                     tp_pct = cfg.tp_bearish_pct
-                    qty = calculate_qty_fixed_risk(
-                        client=client,
-                        symbol=args.symbol,
-                        entry_price=current_close,
-                        sl_pct=sl_pct,
-                        cfg=cfg,
-                    )
+                    qty = 0.015
                     logger.info(f"[ENTRY] BAJISTA->SHORT qty={qty} sl_pct={sl_pct} tp_pct={tp_pct}")
                     if qty > 0:
                         _place_short_with_sl_tp(
