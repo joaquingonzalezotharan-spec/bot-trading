@@ -5,6 +5,7 @@ import logging
 import math
 import sys
 from datetime import datetime, timedelta
+import pytz
 from urllib.parse import quote
 import pandas as pd
 import numpy as np
@@ -666,17 +667,6 @@ def main():
 
         send_telegram_alert(mensaje_reporte_diario)
 
-    now_local_start = datetime.now().astimezone()
-    daily_target_dt = now_local_start.replace(
-        hour=6,
-        minute=25,
-        second=0,
-        microsecond=0,
-    )
-    if now_local_start >= daily_target_dt:
-        daily_target_dt = daily_target_dt + timedelta(days=1)
-    next_daily_report_ts = int(daily_target_dt.timestamp())
-    
     # Intervalo mecánico fijo
     while True:
         try:
@@ -773,13 +763,30 @@ def main():
 
             # Reporte a Telegram cada 2 horas (exacto por timestamp, con re-sincronización).
             now_ts = time.time()
-            if now_ts >= next_daily_report_ts:
-                try:
-                    send_daily_pnl_report()
-                except Exception as e:
-                    logger.warning(f"[TELEGRAM] Error enviando reporte diario: {e}", exc_info=True)
-                daily_target_dt = daily_target_dt + timedelta(days=1)
-                next_daily_report_ts = int(daily_target_dt.timestamp())
+            # --- MODIFICAR EN EL CÓDIGO PRINCIPAL SIN ALTERAR LA POSICIÓN ---
+            zona_local = pytz.timezone('America/Argentina/Buenos_Aires')
+            hora_actual_local = datetime.now(zona_local)
+
+            # Bandera de control para evitar bucles repetidos del reporte en el mismo minuto
+            if not 'reporte_hoy_enviado' in locals():
+                reporte_hoy_enviado = False
+
+            # Restablecer la bandera si cambia de día
+            if hora_actual_local.hour == 0 and hora_actual_local.minute == 0:
+                reporte_hoy_enviado = False
+
+            # CONDICIÓN DE DISPARO INICIAL (Para recibir el reporte de ayer AHORA MISMO al reiniciar)
+            if not 'reporte_inicial_forzado' in locals():
+                print("[REPORTE] Forzando reporte diario inicial de lectura...")
+                send_daily_pnl_report()
+                reporte_inicial_forzado = True
+
+            # Disparo diario automático por horario local de mi país
+            if hora_actual_local.hour == 6 and hora_actual_local.minute == 25 and not reporte_hoy_enviado:
+                print("[REPORTE] Hora local detectada (06:25 AM). Enviando balance diario...")
+                send_daily_pnl_report()
+                reporte_hoy_enviado = True
+            # ---------------------------------------------------------------
             if now_ts >= next_report_ts:
                 try:
                     if abs(position_amt) > 0:
