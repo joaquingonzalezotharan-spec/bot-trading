@@ -732,19 +732,18 @@ def main():
         perdidas_brutas = sum(p for p in realized_pnls if p < 0)
         net_pnl = ganancias_brutas + perdidas_brutas
 
-        # PnL "mensual" pero con inicio HARD: desde el arranque de esta versión
-        # (bot_start_ts_ms) o desde HOY 00:00 (lo que ocurra DESPUÉS).
-        start_today_dt = datetime(
+        # PnL Mensual: desde el día 1 del mes actual (p.ej. 01/08/2026) hasta HOY.
+        # Se calcula 100% en vivo consultando trades y filtrando por timestamp.
+        month_start_dt = datetime(
             now_local.year,
             now_local.month,
-            now_local.day,
+            1,
             0,
             0,
             0,
             tzinfo=now_local.tzinfo,
         )
-        start_today_ms = int(start_today_dt.timestamp() * 1000)
-        month_start_ms = max(bot_start_ts_ms, start_today_ms)
+        month_start_ms = int(month_start_dt.timestamp() * 1000)
         now_ms = int(now_local.timestamp() * 1000)
 
         month_trades: list[dict] = []
