@@ -804,6 +804,22 @@ def main():
     # Intervalo mecánico fijo
     while True:
         try:
+            # Validación temprana anti-Rlimit: primero consultamos posición activa.
+            pos_info = client.futures_position_information(symbol=args.symbol)
+            raw_amt = float(pos_info[0]["positionAmt"]) if pos_info else 0.0
+            position_amt = raw_amt if abs(raw_amt) >= 0.001 else 0.0
+            position_amt = get_effective_position_amt(
+                client,
+                args.symbol,
+                position_amt=position_amt,
+                lookback_seconds=180,
+            )
+
+            if abs(position_amt) != 0:
+                logger.info("[LIVE] POSICION ya activa... No abro una nueva")
+                time.sleep(15)
+                continue
+
             # 1) Descargar klines recientes
             klines = client.futures_klines(
                 symbol=args.symbol,
