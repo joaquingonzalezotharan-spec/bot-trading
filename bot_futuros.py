@@ -257,6 +257,83 @@ def round_price(price: float, symbol_info: dict) -> float:
 # =====================================================================
 # EJECUCIÓN DE ÓRDENES (TP Maker LIMIT / SL Market)
 # =====================================================================
+def set_trade_exits(client, symbol, side, entry_price, qty, tp_pct, sl_pct):
+    """
+    Coloca de forma obligatoria y blindada las órdenes de Take Profit (Limit) 
+    y Stop Loss (Stop Limit) calculando los precios según el régimen actual.
+    """
+    try:
+        # Ajuste matemático de los precios según la dirección del trade
+        if side == "LONG":
+            tp_price = entry_price * (1 + tp_pct)
+            sl_trigger = entry_price * (1 - sl_pct)
+            sl_limit = sl_trigger * 0.9995  # Holgura de protección para asegurar ejecución
+            exit_side = "SELL"
+        elif side == "SHORT":
+            tp_price = entry_price * (1 - tp_pct)
+            sl_trigger = entry_price * (1 + sl_pct)
+            sl_limit = sl_trigger * 1.0005  # Holgura de protección para asegurar ejecución
+            exit_side = "BUY"
+        else:
+            print("[ERROR] Dirección de trade 'side' no válida.")
+            return
+
+        # Redondeo estricto para BTCUSDT (Paso de precio: 0.10 USDT)
+        tp_price = round(float(tp_price), 1)
+        sl_trigger = round(float(sl_trigger), 1)
+        sl_limit = round(float(sl_limit), 1)
+        qty = abs(float(qty))
+        print(f"[API] Configurando salidas para {side}. Entrada: {entry_price} | TP Objetivo: {tp_price} | SL Disparador: {sl_trigger}")
+
+        # Envío y reintento de la orden de Take Profit (LIMIT)
+        tp_placed = False
+        for intento in range(3):
+            try:
+                client.futures_create_order(
+                    symbol=symbol,
+                    side=exit_side,
+                    type="LIMIT",
+                    timeInForce="GTC",
+                    quantity=qty,
+                    price=str(tp_price),
+                    reduceOnly=True
+                )
+                print(f"[API] Orden de Take Profit Limit sembrada con éxito a un precio de: {tp_price}")
+                tp_placed = True
+                break
+            except Exception as e_tp:
+                print(f"[ALERTA] Intento {intento + 1} fallido para TP. Redondeando y reintentando... Error: {e_tp}")
+                tp_price = round(tp_price, 1)
+
+        if not tp_placed:
+            print("[CRÍTICO] No se pudo colocar el Take Profit tras 3 intentos. Revisar Binance manualmente.")
+
+        # Envío de la orden de Stop Loss (STOP_LIMIT) para mitigar el deslizamiento de precios
+        try:
+            client.futures_create_order(
+                symbol=symbol,
+                side=exit_side,
+                type="STOP",
+                quantity=qty,
+                stopPrice=str(sl_trigger),
+                price=str(sl_limit),
+                reduceOnly=True
+            )
+            print(f"[API] Orden de Stop Limit sembrada con éxito a un precio de: {sl_limit} (Disparador: {sl_trigger})")
+        except Exception as e_sl:
+            print(f"[CRÍTICO] Falló el envío del Stop Loss Limit: {e_sl}. Reintentando con orden de emergencia de mercado...")
+            client.futures_create_order(
+                symbol=symbol,
+                side=exit_side,
+                type="STOP_MARKET",
+                quantity=qty,
+                stopPrice=str(sl_trigger),
+                reduceOnly=True
+            )
+            print(f"[API] Orden de Stop Market de emergencia colocada a un precio de: {sl_trigger}")
+    except Exception as e_general:
+        print(f"[ERROR GENERAL EN ÓRDENES DE SALIDA] No se pudo procesar la lógica de TP/SL: {e_general}")
+
 def _place_long_with_stop(
     client: Client,
     symbol: str,
@@ -296,24 +373,18 @@ def _place_long_with_stop(
             logger.warning("[ORDEN] No se confirmó positionAmt LONG antes de SL/TP; omitiendo notificación y órdenes reduceOnly.")
             return
         
-        take_profit_price = round_price(entry_price * (1 + tp_pct), symbol_info)
-        stop_loss_price = round_price(entry_price * (1 - sl_pct), symbol_info)
-        
-        sl_order = client.futures_create_order(
-            symbol=symbol, side="SELL", type="STOP_MARKET",
-            stopPrice=stop_loss_price, reduceOnly=True, quantity=qty
+        # Blindaje TP/SL (Stop Limit + TP Limit) con redondeo BTCUSDT paso 0.10.
+        tp_trigger_price = round(float(entry_price * (1 + tp_pct)), 1)
+        sl_trigger_price = round(float(entry_price * (1 - sl_pct)), 1)
+        set_trade_exits(
+            client=client,
+            symbol=symbol,
+            side="LONG",
+            entry_price=entry_price,
+            qty=qty,
+            tp_pct=tp_pct,
+            sl_pct=sl_pct,
         )
-        sl_trigger_price = sl_order.get("stopPrice") or sl_order.get("stop_price") or stop_loss_price
-        sl_trigger_price = float(sl_trigger_price)
-        logger.info(f"[ORDEN] SL colocado en (STOP_MARKET): {sl_trigger_price}")
-        
-        tp_order = client.futures_create_order(
-            symbol=symbol, side="SELL", type="LIMIT",
-            price=take_profit_price, timeInForce="GTC", reduceOnly=True, quantity=qty
-        )
-        tp_trigger_price = tp_order.get("price") or take_profit_price
-        tp_trigger_price = float(tp_trigger_price)
-        logger.info(f"[ORDEN] TP colocado en (LIMIT Maker GTC): {tp_trigger_price}")
 
         # Notificación visual inmediata desde el móvil.
         msg = (
@@ -370,24 +441,18 @@ def _place_short_with_sl_tp(
             logger.warning("[ORDEN] No se confirmó positionAmt SHORT antes de SL/TP; omitiendo notificación y órdenes reduceOnly.")
             return
         
-        take_profit_price = round_price(entry_price * (1 - tp_pct), symbol_info)
-        stop_loss_price = round_price(entry_price * (1 + sl_pct), symbol_info)
-        
-        sl_order = client.futures_create_order(
-            symbol=symbol, side="BUY", type="STOP_MARKET",
-            stopPrice=stop_loss_price, reduceOnly=True, quantity=qty
+        # Blindaje TP/SL (Stop Limit + TP Limit) con redondeo BTCUSDT paso 0.10.
+        tp_trigger_price = round(float(entry_price * (1 - tp_pct)), 1)
+        sl_trigger_price = round(float(entry_price * (1 + sl_pct)), 1)
+        set_trade_exits(
+            client=client,
+            symbol=symbol,
+            side="SHORT",
+            entry_price=entry_price,
+            qty=qty,
+            tp_pct=tp_pct,
+            sl_pct=sl_pct,
         )
-        sl_trigger_price = sl_order.get("stopPrice") or sl_order.get("stop_price") or stop_loss_price
-        sl_trigger_price = float(sl_trigger_price)
-        logger.info(f"[ORDEN] SL colocado en (STOP_MARKET): {sl_trigger_price}")
-        
-        tp_order = client.futures_create_order(
-            symbol=symbol, side="BUY", type="LIMIT",
-            price=take_profit_price, timeInForce="GTC", reduceOnly=True, quantity=qty
-        )
-        tp_trigger_price = tp_order.get("price") or take_profit_price
-        tp_trigger_price = float(tp_trigger_price)
-        logger.info(f"[ORDEN] TP colocado en (LIMIT Maker GTC): {tp_trigger_price}")
 
         # Notificación visual inmediata desde el móvil.
         msg = (
@@ -816,7 +881,7 @@ def main():
             )
 
             if abs(position_amt) != 0:
-                logger.info("[LIVE] POSICION ya activa... No abro una nueva")
+                logger.info(f"[LIVE] POSICION ya activa (positionAmt={position_amt}). No abro una nueva.")
                 time.sleep(15)
                 continue
 
