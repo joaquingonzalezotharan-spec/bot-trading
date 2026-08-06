@@ -163,17 +163,17 @@ class StrategyConfig:
     
     lateral_rsi_entry = 32.0
     lateral_rsi_exit = 70.0
-    sl_lateral_pct = 0.0030          
+    sl_lateral_pct = 0.0040          
     tp_lateral_pct = 0.0035          
     
     bullish_rsi_entry = 65.0
-    sl_bullish_pct = 0.0025          
-    tp_bullish_pct = 0.0050          
+    sl_bullish_pct = 0.0040          
+    tp_bullish_pct = 0.0100          
     
     bearish_rsi_entry = 55.0
     bearish_rsi_exit = 35.0
     sl_bearish_pct = 0.0040          
-    tp_bearish_pct = 0.0080          
+    tp_bearish_pct = 0.0100          
     
     regime_lookback = 10
     cross_window = 6
@@ -1006,10 +1006,10 @@ def main():
                         if position_amt > 0:
                             # LONG: TP = entry*(1+tp), SL = entry*(1-sl)
                             if regime == "ALCISTA":
-                                tp_pct = cfg.tp_bullish_pct * 1.2
+                                tp_pct = cfg.tp_bullish_pct
                                 sl_pct = cfg.sl_bullish_pct
                             else:
-                                tp_pct = cfg.tp_lateral_pct * 0.8
+                                tp_pct = cfg.tp_lateral_pct
                                 sl_pct = cfg.sl_lateral_pct
 
                             tp_hit = current_close >= (entry_price_val * (1 + tp_pct))
@@ -1032,7 +1032,7 @@ def main():
                                     logger.warning(f"[EMERGENCIA] Falló cierre LONG: {e}", exc_info=True)
                         else:
                             # SHORT: TP = entry*(1-tp), SL = entry*(1+sl)
-                            tp_pct = cfg.tp_bearish_pct * 1.2
+                            tp_pct = cfg.tp_bearish_pct
                             sl_pct = cfg.sl_bearish_pct
 
                             tp_hit = current_close <= (entry_price_val * (1 - tp_pct))
@@ -1060,7 +1060,7 @@ def main():
                 # 5) Reglas de entrada
                 if is_lateral and volume_ok and current_rsi <= cfg.lateral_rsi_entry:
                     sl_pct = cfg.sl_lateral_pct
-                    tp_pct = cfg.tp_lateral_pct * 0.8
+                    tp_pct = cfg.tp_lateral_pct
                     qty = 0.015
                     logger.info(f"[ENTRY] LATERAL->LONG qty={qty} sl_pct={sl_pct} tp_pct={tp_pct}")
                     if qty > 0:
@@ -1076,7 +1076,7 @@ def main():
                         )
                 elif is_alcista and volume_ok and current_rsi <= cfg.bullish_rsi_entry:
                     sl_pct = cfg.sl_bullish_pct
-                    tp_pct = cfg.tp_bullish_pct * 1.2
+                    tp_pct = cfg.tp_bullish_pct
                     qty = 0.015
                     logger.info(f"[ENTRY] ALCISTA->LONG qty={qty} sl_pct={sl_pct} tp_pct={tp_pct}")
                     if qty > 0:
@@ -1092,7 +1092,7 @@ def main():
                         )
                 elif is_bajista and volume_ok and current_rsi >= cfg.bearish_rsi_entry:
                     sl_pct = cfg.sl_bearish_pct
-                    tp_pct = cfg.tp_bearish_pct * 1.2
+                    tp_pct = cfg.tp_bearish_pct
                     qty = 0.015
                     logger.info(f"[ENTRY] BAJISTA->SHORT qty={qty} sl_pct={sl_pct} tp_pct={tp_pct}")
                     if qty > 0:
