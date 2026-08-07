@@ -167,13 +167,13 @@ class StrategyConfig:
     tp_lateral_pct = 0.0035          
     
     bullish_rsi_entry = 65.0
-    sl_bullish_pct = 0.0040          
-    tp_bullish_pct = 0.0100          
+    sl_bullish_pct = 0.0035          # Stop Loss tendencial: 0.35%
+    tp_bullish_pct = 0.0065          # Take Profit tendencial: 0.65%
     
     bearish_rsi_entry = 55.0
     bearish_rsi_exit = 35.0
     sl_bearish_pct = 0.0040          
-    tp_bearish_pct = 0.0100          
+    tp_bearish_pct = 0.0085          # Take Profit tendencial: 0.85%
     
     regime_lookback = 10
     cross_window = 6
@@ -979,8 +979,8 @@ def main():
                 )
                 send_telegram_alert(mensaje_cierre)
                 had_position = False
-                checked_orders_for_position = False
-                has_reduce_sl_tp_cached = True
+                checked_orders_for_position = None
+                has_reduce_sl_tp_cached = 0
 
             # Reporte a Telegram cada 2 horas (exacto por timestamp, con re-sincronización).
             now_ts = time.time()
@@ -1086,12 +1086,10 @@ def main():
                     if entry_price_val is not None:
                         if position_amt > 0:
                             # LONG: TP = entry*(1+tp), SL = entry*(1-sl)
-                            if regime == "ALCISTA":
-                                tp_pct = cfg.tp_bullish_pct
-                                sl_pct = cfg.sl_bullish_pct
-                            else:
-                                tp_pct = cfg.tp_lateral_pct
-                                sl_pct = cfg.sl_lateral_pct
+                            # Salida coherente con la posición LONG: usar objetivos bullish (tendencia),
+                            # evitando cualquier uso de TP/SL lateral en esta emergencia.
+                            tp_pct = cfg.tp_bullish_pct
+                            sl_pct = cfg.sl_bullish_pct
 
                             tp_hit = current_close >= (entry_price_val * (1 + tp_pct))
                             sl_hit = current_close <= (entry_price_val * (1 - sl_pct))
@@ -1139,22 +1137,9 @@ def main():
                 client.futures_cancel_all_open_orders(symbol=args.symbol)
 
                 # 5) Reglas de entrada
-                if is_lateral and volume_ok and current_rsi <= cfg.lateral_rsi_entry:
-                    sl_pct = cfg.sl_lateral_pct
-                    tp_pct = cfg.tp_lateral_pct
-                    qty = 0.015
-                    logger.info(f"[ENTRY] LATERAL->LONG qty={qty} sl_pct={sl_pct} tp_pct={tp_pct}")
-                    if qty > 0:
-                        _place_long_with_stop(
-                            client,
-                            args.symbol,
-                            qty,
-                            current_close,
-                            sl_pct,
-                            tp_pct,
-                            symbol_info,
-                            proxies=requests_params.get("proxies"),
-                        )
+                if is_lateral:
+                    # LATERAL deshabilitado: no abrir operaciones bajo ninguna circunstancia.
+                    pass
                 elif is_alcista and volume_ok and current_rsi <= cfg.bullish_rsi_entry:
                     sl_pct = cfg.sl_bullish_pct
                     tp_pct = cfg.tp_bullish_pct
