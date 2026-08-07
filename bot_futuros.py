@@ -417,15 +417,15 @@ def _place_long_with_stop(
         )
 
         # Notificación visual inmediata desde el móvil.
+        volumen_btc = float(confirmed_pos_amt)
         msg = (
-            "🚀 ¡OPERACIÓN ABIERTA Y BLINDADA!\n"
-            "• Tipo: LONG\n"
-            f"• Precio Entrada: {entry_price_exec:.6f}\n"
-            f"• Tamaño: {confirmed_pos_amt}\n"
-            f"• 🎯 Take Profit (Nativo): {tp_trigger_price:.6f}\n"
-            f"• 🛑 Stop Loss (Nativo): {sl_trigger_price:.6f}\n"
-            "Nota: Asegúrate de extraer los precios de disparo reales devueltos por la respuesta de la API de Binance "
-            "para garantizar que el mensaje muestre los valores exactos que quedaron guardados en el libro de órdenes"
+            "*APERTURA DE POSICION EJECUTADA*\n"
+            f"Activo: {symbol}\n"
+            "Direccion: LONG\n"
+            f"Volumen: {volumen_btc:.3f} BTC\n"
+            f"Precio de Entrada: {entry_price_exec:,.2f} USDT\n"
+            f"Take Profit: {tp_trigger_price:,.2f} USDT\n"
+            f"Stop Loss: {sl_trigger_price:,.2f} USDT"
         )
         enviar_telegram(msg, proxies=proxies)
     except BinanceAPIException as e:
@@ -500,15 +500,15 @@ def _place_short_with_sl_tp(
         )
 
         # Notificación visual inmediata desde el móvil.
+        volumen_btc = float(confirmed_pos_amt)
         msg = (
-            "🚀 ¡OPERACIÓN ABIERTA Y BLINDADA!\n"
-            "• Tipo: SHORT\n"
-            f"• Precio Entrada: {entry_price_exec:.6f}\n"
-            f"• Tamaño: {confirmed_pos_amt}\n"
-            f"• 🎯 Take Profit (Nativo): {tp_trigger_price:.6f}\n"
-            f"• 🛑 Stop Loss (Nativo): {sl_trigger_price:.6f}\n"
-            "Nota: Asegúrate de extraer los precios de disparo reales devueltos por la respuesta de la API de Binance "
-            "para garantizar que el mensaje muestre los valores exactos que quedaron guardados en el libro de órdenes"
+            "*APERTURA DE POSICION EJECUTADA*\n"
+            f"Activo: {symbol}\n"
+            "Direccion: SHORT\n"
+            f"Volumen: {volumen_btc:.3f} BTC\n"
+            f"Precio de Entrada: {entry_price_exec:,.2f} USDT\n"
+            f"Take Profit: {tp_trigger_price:,.2f} USDT\n"
+            f"Stop Loss: {sl_trigger_price:,.2f} USDT"
         )
         enviar_telegram(msg, proxies=proxies)
     except BinanceAPIException as e:
@@ -643,7 +643,7 @@ def main():
 
             if code == -4067:
                 logger.warning(
-                    "⚠️ El tipo de margen ya está configurado o existen posiciones/órdenes abiertas. Omitiendo configuración inicial..."
+                    "Advertencia: el tipo de margen ya está configurado o existen posiciones/órdenes abiertas. Omitiendo configuración inicial."
                 )
             else:
                 logger.warning(
@@ -680,7 +680,7 @@ def main():
         )
     info = client.futures_exchange_info()
     symbol_info = next(item for item in info['symbols'] if item['symbol'] == args.symbol)
-    logger.info("===> Your service is live 🚀")
+    logger.info("Service is live.")
     
     # Reporte periódico a Telegram cada 2 horas (sin interferir con el loop de 60s).
     report_interval_s = 2 * 60 * 60
@@ -751,14 +751,13 @@ def main():
             else:
                 perdidas_acumuladas += pnl
 
-        emoji_resultado = "🟢" if balance_neto_total >= 0 else "🔴"
         mensaje_auditoria = (
-            "🏆 *Bot Futuros: Balance Histórico Total*\n"
-            "🚀 *Desde el inicio de operaciones hasta hoy*\n"
-            f"🔄 *Total operaciones cerradas:* {total_operaciones_cerradas}\n"
-            f"💰 *Ganancias acumuladas:* {ganancias_acumuladas:+.2f} USDT\n"
-            f"💸 *Pérdidas acumuladas:* {perdidas_acumuladas:.2f} USDT\n"
-            f"⚖️ *BALANCE NETO TOTAL:* {emoji_resultado} {balance_neto_total:+.2f} USDT"
+            "*Bot Futuros: Balance Historico Total*\n"
+            "Desde el inicio de operaciones hasta hoy\n"
+            f"Total operaciones cerradas: {total_operaciones_cerradas}\n"
+            f"Ganancias acumuladas: {ganancias_acumuladas:+.2f} USDT\n"
+            f"Perdidas acumuladas: {perdidas_acumuladas:.2f} USDT\n"
+            f"Balance neto total: {balance_neto_total:+.2f} USDT"
         )
 
         send_telegram_alert(mensaje_auditoria)
@@ -909,17 +908,16 @@ def main():
             net_pnl_trade = realized_pnl - commission
             monthly_net_pnl += net_pnl_trade
 
-        emoji_resultado = "🟢" if net_pnl >= 0 else "🔴"
         fecha_ayer_str = yesterday_date.strftime("%d/%m/%Y")
 
         mensaje_reporte_diario = (
-            "📊 *Bot Futuros: Reporte Diario de Rendimiento*\n"
-            f"📆 *Período analizado:* {fecha_ayer_str}\n"
-            f"🔄 *Operaciones cerradas:* {operaciones_cerradas}\n"
-            f"🟢 *Ganancias brutas:* {ganancias_brutas:+.2f} USDT\n"
-            f"🔴 *Pérdidas brutas:* {perdidas_brutas:.2f} USDT\n"
-            f"🎚️ *Resultado Neto:* {emoji_resultado} {net_pnl:+.2f} USDT\n"
-            f"📅 *PNL Mensual (Mes actual):* {monthly_net_pnl:+.2f} USDT"
+            "Bot Futuros: Reporte Diario de Rendimiento\n"
+            f"Periodo analizado: {fecha_ayer_str}\n"
+            f"Operaciones cerradas: {operaciones_cerradas}\n"
+            f"Ganancias brutas: {ganancias_brutas:+.2f} USDT\n"
+            f"Perdidas brutas: {perdidas_brutas:.2f} USDT\n"
+            f"Resultado neto: {net_pnl:+.2f} USDT\n"
+            f"PNL Mensual (Mes actual): {monthly_net_pnl:+.2f} USDT"
         )
 
         send_telegram_alert(mensaje_reporte_diario)
@@ -945,6 +943,8 @@ def main():
             if prev_position_amt > 0.0001 and current_position_amt < 0.0001:
                 pnl_realizado = 0.0
                 precio_salida = None
+                cantidad_total = 0.0
+                comision_total = 0.0
                 direccion_cerrada = "LONG" if prev_position_amt_signed > 0 else "SHORT"
 
                 try:
@@ -960,20 +960,37 @@ def main():
                             precio_salida = float(precio_salida) if precio_salida is not None else None
                         except Exception:
                             precio_salida = None
+                        try:
+                            cantidad_total = float(
+                                ultimo_trade.get("qty")
+                                or ultimo_trade.get("quantity")
+                                or 0.0
+                            )
+                        except Exception:
+                            cantidad_total = 0.0
+                        try:
+                            comision_total_raw = float(ultimo_trade.get("commission", 0.0) or 0.0)
+                            comision_total = abs(comision_total_raw)
+                        except Exception:
+                            comision_total = 0.0
                 except Exception:
                     pnl_realizado = 0.0
                     precio_salida = None
 
-                emoji_resultado = "🟢" if pnl_realizado >= 0 else "🔴"
-                signo = "+" if pnl_realizado >= 0 else ""
+                status_text = "Cierre de posicion"
+                lado_salida = direccion_cerrada
+                precio_ejecucion = float(precio_salida) if precio_salida is not None else 0.0
+                resultado_neto = float(pnl_realizado) - float(comision_total)
 
-                precio_salida_str = f"{precio_salida:.6f}" if precio_salida is not None else "N/A"
                 mensaje_cierre = (
-                    f"🏁 *Bot Futuros: Posición Cerrada*\n\n"
-                    f"📌 *Dirección:* {direccion_cerrada}\n"
-                    f"📊 *Resultado:* {emoji_resultado} Net PNL: {signo}{pnl_realizado:.2f} USDT\n"
-                    f"🎯 *Precio de salida:* {precio_salida_str}\n"
-                    f"🔒 *Estado de Cuenta:* Limpia y en cero, escaneando el mercado cada 15 segundos..."
+                    "*REPORTE DE CIERRE DE POSICION*\n"
+                    f"Estado: {status_text}\n"
+                    f"• Direccion: {lado_salida}\n"
+                    f"• Volumen: {float(cantidad_total):.3f} BTC\n"
+                    f"• Precio de Ejecucion: {precio_ejecucion:,.2f} USDT\n"
+                    f"• PNL Bruto: {float(pnl_realizado):+.4f} USDT\n"
+                    f"• Comisiones: -{float(comision_total):.4f} USDT\n"
+                    f"• Balance Neto: {float(resultado_neto):+.4f} USDT"
                 )
                 send_telegram_alert(mensaje_cierre)
 
@@ -1336,8 +1353,9 @@ def main():
                     if daily_net_pnl < (-float(cfg.max_daily_loss_usd)):
                         logger.critical("CRÍTICO: Límite de Drawdown Diario Alcanzado. Bot en pausa hasta mañana.")
                         enviar_telegram(
-                            "🚨 *CRÍTICO:* Límite de Drawdown Diario Alcanzado.\n"
-                            "El bot queda en pausa hasta mañana (UTC) para evitar más pérdidas.",
+                            "*ALERTA DE SISTEMA: LIMITE DE DRAWDOWN ALCANZADO*\n"
+                            "Detalle: Las perdidas acumuladas del dia excedieron el maximo parametrizado.\n"
+                            "Accion: Detencion preventiva de busqueda de entradas hasta proximo ciclo diario.",
                             proxies=requests_params.get("proxies"),
                         )
                         daily_drawdown_paused = True
