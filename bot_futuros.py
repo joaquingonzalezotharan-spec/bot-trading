@@ -725,6 +725,12 @@ def main():
     had_position = False
     checked_orders_for_position = False
     has_reduce_sl_tp_cached = True
+
+    # Persistencia entre ciclos para detectar cierres reales (TP/SL) de forma inmediata.
+    # Importante: debe actualizarse incluso en ramas con `continue`, por eso se gestiona
+    # inmediatamente después de leer positionAmt.
+    prev_position_amt = 0.0
+    prev_position_amt_signed = 0.0
     
     def send_daily_pnl_report() -> None:
         # Reporte para "ayer completo" en hora local del servidor.
@@ -881,6 +887,53 @@ def main():
             )
 
             valor_posicion = abs(float(position_amt))
+
+            # --------------- Detección de cierre (persistente) ---------------
+            current_position_amt = abs(float(position_amt))
+            if prev_position_amt > 0.0001 and current_position_amt < 0.0001:
+                pnl_realizado = 0.0
+                precio_salida = None
+                direccion_cerrada = "LONG" if prev_position_amt_signed > 0 else "SHORT"
+
+                try:
+                    # Dar tiempo a Binance para reflejar realizedPnl/price del cierre
+                    time.sleep(2)
+                    trades = client.futures_account_trades(symbol="BTCUSDT", limit=5)
+                    ultimo_trade = trades[0] if trades else None
+                    if ultimo_trade:
+                        pnl_realizado = float(ultimo_trade.get("realizedPnl", 0.0) or 0.0)
+                        # price suele representar el precio de ejecución del último fill/transaction
+                        precio_salida = ultimo_trade.get("price") or ultimo_trade.get("avgPrice") or ultimo_trade.get("avg_price")
+                        try:
+                            precio_salida = float(precio_salida) if precio_salida is not None else None
+                        except Exception:
+                            precio_salida = None
+                except Exception:
+                    pnl_realizado = 0.0
+                    precio_salida = None
+
+                emoji_resultado = "🟢" if pnl_realizado >= 0 else "🔴"
+                signo = "+" if pnl_realizado >= 0 else ""
+
+                precio_salida_str = f"{precio_salida:.6f}" if precio_salida is not None else "N/A"
+                mensaje_cierre = (
+                    f"🏁 *Bot Futuros: Posición Cerrada*\n\n"
+                    f"📌 *Dirección:* {direccion_cerrada}\n"
+                    f"📊 *Resultado:* {emoji_resultado} Net PNL: {signo}{pnl_realizado:.2f} USDT\n"
+                    f"🎯 *Precio de salida:* {precio_salida_str}\n"
+                    f"🔒 *Estado de Cuenta:* Limpia y en cero, escaneando el mercado cada 15 segundos..."
+                )
+                send_telegram_alert(mensaje_cierre)
+
+                # Reset de estado interno tras cierre para evitar bucles/ruido.
+                had_position = False
+                checked_orders_for_position = None
+                has_reduce_sl_tp_cached = 0
+
+            # Actualizamos estado para el próximo ciclo (crucial incluso si hacemos continue).
+            prev_position_amt = current_position_amt
+            prev_position_amt_signed = float(position_amt)
+            # ---------------------------------------------------------------
             if valor_posicion > 0.0005:
                 logger.info(f"[LIVE] POSICION ya activa (positionAmt={position_amt}). No abro una nueva.")
                 time.sleep(15)
@@ -955,32 +1008,6 @@ def main():
                 position_amt=position_amt,
                 lookback_seconds=180,
             )
-
-            # Alerta de cierre con PNL realizado (cuando pasamos de posición activa a posición=0)
-            if abs(position_amt) > 0:
-                had_position = True
-            elif had_position and abs(position_amt) == 0:
-                pnl_realizado = 0.0  # Extrae aquí el PNL del último trade cerrado de Binance
-                try:
-                    time.sleep(2)
-                    trades = client.futures_account_trades(symbol="BTCUSDT", limit=5)
-                    ultimo_trade = trades[0] if trades else None
-                    if ultimo_trade:
-                        pnl_realizado = float(ultimo_trade["realizedPnl"])
-                except Exception:
-                    pnl_realizado = 0.0
-
-                emoji_resultado = "🟢" if pnl_realizado >= 0 else "🔴"
-                signo = "+" if pnl_realizado >= 0 else ""
-                mensaje_cierre = (
-                    f"🏁 *Bot Futuros: Posición Cerrada*\n\n"
-                    f"📊 *Resultado:* {emoji_resultado} Net PNL: {signo}{pnl_realizado:.2f} USDT\n"
-                    f"🔒 *Estado de Cuenta:* Limpia y en cero, escaneando el mercado cada 15 segundos..."
-                )
-                send_telegram_alert(mensaje_cierre)
-                had_position = False
-                checked_orders_for_position = None
-                has_reduce_sl_tp_cached = 0
 
             # Reporte a Telegram cada 2 horas (exacto por timestamp, con re-sincronización).
             now_ts = time.time()
