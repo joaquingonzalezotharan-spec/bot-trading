@@ -257,20 +257,31 @@ def round_price(price: float, symbol_info: dict) -> float:
 # =====================================================================
 # EJECUCIÓN DE ÓRDENES (TP Maker LIMIT / SL Market)
 # =====================================================================
+def estimate_fee_friction_rate() -> float:
+    """
+    Ajuste de fricción para absorber fees de ida y vuelta.
+    Se usa el ajuste fijo requerido por las ecuaciones de compensación.
+    """
+    maker_fee = 0.0002  # 0.02%
+    taker_fee = 0.0005  # 0.05%
+    logger.info(f"[FEES] Maker={maker_fee:.6f} Taker={taker_fee:.6f} | friction_used=0.0007")
+    return 0.0007
+
 def set_trade_exits(client, symbol, side, entry_price, qty, tp_pct, sl_pct):
     """
     Coloca de forma obligatoria y blindada las órdenes de Take Profit (Limit) 
     y Stop Loss (Stop Limit) calculando los precios según el régimen actual.
     """
     try:
+        friction = estimate_fee_friction_rate()
         # Ajuste matemático de los precios según la dirección del trade
         if side == "LONG":
-            tp_price = entry_price * (1 + tp_pct)
+            tp_price = entry_price * (1 + tp_pct + friction)
             sl_trigger = entry_price * (1 - sl_pct)
             sl_limit = sl_trigger * 0.9995  # Holgura de protección para asegurar ejecución
             exit_side = "SELL"
         elif side == "SHORT":
-            tp_price = entry_price * (1 - tp_pct)
+            tp_price = entry_price * (1 - tp_pct - friction)
             sl_trigger = entry_price * (1 + sl_pct)
             sl_limit = sl_trigger * 1.0005  # Holgura de protección para asegurar ejecución
             exit_side = "BUY"
@@ -345,42 +356,57 @@ def _place_long_with_stop(
     proxies: dict | None = None,
 ):
     try:
-        logger.info(f"[ORDEN] Abriendo posición LONG en Market. Cantidad: {qty}")
-        market_order = client.futures_create_order(
+        logger.info(f"[ORDEN] Abriendo posición LONG en LIMIT. Cantidad: {qty} | price={entry_price}")
+        entry_order = client.futures_create_order(
             symbol=symbol,
             side="BUY",
-            type="MARKET",
+            type="LIMIT",
+            timeInForce="GTC",
             quantity=qty,
+            price=str(entry_price),
         )
-        exec_price = market_order.get("avgPrice") or market_order.get("avg_price") or entry_price
-        exec_price = float(exec_price)
+        order_id = entry_order.get("orderId")
 
-        # IMPORTANTE: esperamos a que Binance refleje la posición antes de
-        # enviar órdenes reduceOnly (evita APIError "Reduce-only order failed").
+        # Espera máxima: 30s para que el LIMIT ejecute.
         confirmed_pos_amt = 0.0
-        for _ in range(10):
+        entry_price_exec = float(entry_price)
+        deadline = time.time() + 30
+        while time.time() < deadline:
             try:
                 pos_info = client.futures_position_information(symbol=symbol)
                 pos_amt = float(pos_info[0]["positionAmt"]) if pos_info else 0.0
                 if pos_amt > 0:
                     confirmed_pos_amt = pos_amt
+                    try:
+                        ep = pos_info[0].get("entryPrice") or pos_info[0].get("entry_price")
+                        entry_price_exec = float(ep) if ep is not None else entry_price_exec
+                    except Exception:
+                        pass
                     break
             except Exception:
                 pass
-            time.sleep(0.2)
+            time.sleep(1)
         
         if confirmed_pos_amt <= 0:
-            logger.warning("[ORDEN] No se confirmó positionAmt LONG antes de SL/TP; omitiendo notificación y órdenes reduceOnly.")
+            # Cancelamos el LIMIT no ejecutado.
+            if order_id is not None:
+                try:
+                    client.futures_cancel_order(symbol=symbol, orderId=order_id)
+                    logger.warning(f"[ORDEN] LIMIT LONG no ejecutado en 30s. Cancelado orderId={order_id}.")
+                except BinanceAPIException as e_cancel:
+                    logger.warning(f"[ORDEN] Falló cancel de LIMIT LONG (orderId={order_id}): {e_cancel}", exc_info=True)
+            logger.warning("[ORDEN] No se confirmó positionAmt LONG antes de SL/TP; omitiendo.")
             return
         
         # Blindaje TP/SL (Stop Limit + TP Limit) con redondeo BTCUSDT paso 0.10.
-        tp_trigger_price = round(float(entry_price * (1 + tp_pct)), 1)
-        sl_trigger_price = round(float(entry_price * (1 - sl_pct)), 1)
+        friction = 0.0007
+        tp_trigger_price = round(float(entry_price_exec * (1 + tp_pct + friction)), 1)
+        sl_trigger_price = round(float(entry_price_exec * (1 - sl_pct)), 1)
         set_trade_exits(
             client=client,
             symbol=symbol,
             side="LONG",
-            entry_price=entry_price,
+            entry_price=entry_price_exec,
             qty=qty,
             tp_pct=tp_pct,
             sl_pct=sl_pct,
@@ -390,7 +416,7 @@ def _place_long_with_stop(
         msg = (
             "🚀 ¡OPERACIÓN ABIERTA Y BLINDADA!\n"
             "• Tipo: LONG\n"
-            f"• Precio Entrada: {exec_price:.6f}\n"
+            f"• Precio Entrada: {entry_price_exec:.6f}\n"
             f"• Tamaño: {confirmed_pos_amt}\n"
             f"• 🎯 Take Profit (Nativo): {tp_trigger_price:.6f}\n"
             f"• 🛑 Stop Loss (Nativo): {sl_trigger_price:.6f}\n"
@@ -413,42 +439,57 @@ def _place_short_with_sl_tp(
     proxies: dict | None = None,
 ):
     try:
-        logger.info(f"[ORDEN] Abriendo posición SHORT en Market. Cantidad: {qty}")
-        market_order = client.futures_create_order(
+        logger.info(f"[ORDEN] Abriendo posición SHORT en LIMIT. Cantidad: {qty} | price={entry_price}")
+        entry_order = client.futures_create_order(
             symbol=symbol,
             side="SELL",
-            type="MARKET",
+            type="LIMIT",
+            timeInForce="GTC",
             quantity=qty,
+            price=str(entry_price),
         )
-        exec_price = market_order.get("avgPrice") or market_order.get("avg_price") or entry_price
-        exec_price = float(exec_price)
+        order_id = entry_order.get("orderId")
 
-        # IMPORTANTE: esperamos a que Binance refleje la posición antes de
-        # enviar órdenes reduceOnly (evita APIError "Reduce-only order failed").
+        # Espera máxima: 30s para que el LIMIT ejecute.
         confirmed_pos_amt = 0.0
-        for _ in range(10):
+        entry_price_exec = float(entry_price)
+        deadline = time.time() + 30
+        while time.time() < deadline:
             try:
                 pos_info = client.futures_position_information(symbol=symbol)
                 pos_amt = float(pos_info[0]["positionAmt"]) if pos_info else 0.0
                 if pos_amt < 0:
                     confirmed_pos_amt = pos_amt
+                    try:
+                        ep = pos_info[0].get("entryPrice") or pos_info[0].get("entry_price")
+                        entry_price_exec = float(ep) if ep is not None else entry_price_exec
+                    except Exception:
+                        pass
                     break
             except Exception:
                 pass
-            time.sleep(0.2)
+            time.sleep(1)
         
         if confirmed_pos_amt >= 0:
-            logger.warning("[ORDEN] No se confirmó positionAmt SHORT antes de SL/TP; omitiendo notificación y órdenes reduceOnly.")
+            # Cancelamos el LIMIT no ejecutado.
+            if order_id is not None:
+                try:
+                    client.futures_cancel_order(symbol=symbol, orderId=order_id)
+                    logger.warning(f"[ORDEN] LIMIT SHORT no ejecutado en 30s. Cancelado orderId={order_id}.")
+                except BinanceAPIException as e_cancel:
+                    logger.warning(f"[ORDEN] Falló cancel de LIMIT SHORT (orderId={order_id}): {e_cancel}", exc_info=True)
+            logger.warning("[ORDEN] No se confirmó positionAmt SHORT antes de SL/TP; omitiendo.")
             return
         
         # Blindaje TP/SL (Stop Limit + TP Limit) con redondeo BTCUSDT paso 0.10.
-        tp_trigger_price = round(float(entry_price * (1 - tp_pct)), 1)
-        sl_trigger_price = round(float(entry_price * (1 + sl_pct)), 1)
+        friction = 0.0007
+        tp_trigger_price = round(float(entry_price_exec * (1 - tp_pct - friction)), 1)
+        sl_trigger_price = round(float(entry_price_exec * (1 + sl_pct)), 1)
         set_trade_exits(
             client=client,
             symbol=symbol,
             side="SHORT",
-            entry_price=entry_price,
+            entry_price=entry_price_exec,
             qty=qty,
             tp_pct=tp_pct,
             sl_pct=sl_pct,
@@ -458,7 +499,7 @@ def _place_short_with_sl_tp(
         msg = (
             "🚀 ¡OPERACIÓN ABIERTA Y BLINDADA!\n"
             "• Tipo: SHORT\n"
-            f"• Precio Entrada: {exec_price:.6f}\n"
+            f"• Precio Entrada: {entry_price_exec:.6f}\n"
             f"• Tamaño: {confirmed_pos_amt}\n"
             f"• 🎯 Take Profit (Nativo): {tp_trigger_price:.6f}\n"
             f"• 🛑 Stop Loss (Nativo): {sl_trigger_price:.6f}\n"
@@ -731,6 +772,9 @@ def main():
     # inmediatamente después de leer positionAmt.
     prev_position_amt = 0.0
     prev_position_amt_signed = 0.0
+
+    # Se aplica una sola vez por posición para evitar modificaciones repetitivas.
+    break_even_applied = False
     
     def send_daily_pnl_report() -> None:
         # Reporte para "ayer completo" en hora local del servidor.
@@ -929,6 +973,7 @@ def main():
                 had_position = False
                 checked_orders_for_position = None
                 has_reduce_sl_tp_cached = 0
+                break_even_applied = False
 
             # Actualizamos estado para el próximo ciclo (crucial incluso si hacemos continue).
             prev_position_amt = current_position_amt
@@ -936,6 +981,78 @@ def main():
             # ---------------------------------------------------------------
             if valor_posicion > 0.0005:
                 logger.info(f"[LIVE] POSICION ya activa (positionAmt={position_amt}). No abro una nueva.")
+                # Break-even protection (monitor intermedio sin tocar indicadores/régimen)
+                if not break_even_applied:
+                    try:
+                        entry_price_val = None
+                        try:
+                            entry_price_val = pos_info[0].get("entryPrice") or pos_info[0].get("entry_price")
+                            entry_price_val = float(entry_price_val) if entry_price_val is not None else None
+                        except Exception:
+                            entry_price_val = None
+
+                        if entry_price_val is not None:
+                            # Precio actual vía ticker (evita recomputar indicadores).
+                            ticker = client.futures_symbol_ticker(symbol=args.symbol)
+                            current_px = float(ticker.get("price"))
+
+                            break_even_trigger_pct = 0.0030  # +0.30% a favor
+                            break_even_offset = entry_price_val * 0.0007
+                            stop_px = round(float(entry_price_val + break_even_offset), 1)  # tick BTCUSDT=0.10
+
+                            should_move = (
+                                (position_amt > 0 and current_px >= entry_price_val * (1 + break_even_trigger_pct))
+                                or (position_amt < 0 and current_px <= entry_price_val * (1 - break_even_trigger_pct))
+                            )
+
+                            if should_move:
+                                logger.info(
+                                    "[BREAKEVEN] Precio objetivo alcanzado, moviendo Stop Loss a Break-Even..."
+                                    f" entry={entry_price_val} current={current_px} stop_px={stop_px}"
+                                )
+
+                                # Cancelamos el STOP reduceOnly existente (STOP/STOP_MARKET).
+                                try:
+                                    open_orders = client.futures_get_open_orders(symbol=args.symbol)
+                                except BinanceAPIException as e_open:
+                                    open_orders = []
+                                    logger.warning(f"[BREAKEVEN] No se pudieron listar open_orders: {e_open}", exc_info=True)
+
+                                for o in (open_orders or []):
+                                    try:
+                                        if o.get("reduceOnly") and o.get("type") in ("STOP", "STOP_MARKET", "STOP_LIMIT"):
+                                            oid = o.get("orderId")
+                                            if oid is not None:
+                                                try:
+                                                    client.futures_cancel_order(symbol=args.symbol, orderId=oid)
+                                                    logger.info(f"[BREAKEVEN] Stop anterior cancelado (orderId={oid}).")
+                                                except BinanceAPIException as e_cancel:
+                                                    logger.warning(
+                                                        f"[BREAKEVEN] Falló cancel de stop (orderId={oid}): {e_cancel}",
+                                                        exc_info=True,
+                                                    )
+                                    except Exception:
+                                        pass
+
+                                # Colocamos un nuevo STOP_MARKET en Break-Even.
+                                side_close = "SELL" if position_amt > 0 else "BUY"
+                                qty_abs = abs(float(position_amt))
+                                try:
+                                    client.futures_create_order(
+                                        symbol=args.symbol,
+                                        side=side_close,
+                                        type="STOP_MARKET",
+                                        quantity=qty_abs,
+                                        stopPrice=str(stop_px),
+                                        reduceOnly=True,
+                                    )
+                                    break_even_applied = True
+                                    logger.info(f"[BREAKEVEN] Nuevo STOP_MARKET colocado en stop_px={stop_px}.")
+                                except BinanceAPIException as e_mod:
+                                    logger.warning(f"[BREAKEVEN] Falló colocar STOP_MARKET: {e_mod}", exc_info=True)
+                    except BinanceAPIException as e_be:
+                        logger.warning(f"[BREAKEVEN] Error Binance en break-even monitor: {e_be}", exc_info=True)
+
                 time.sleep(15)
                 continue
 
