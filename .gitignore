@@ -22,9 +22,44 @@ ENV/
 # OS
 .DS_Store
 
+# macOS filesystem metadata / transient folders
+.Trash/
+.fseventsd/
+.AppleDouble/
+.LSOverride/
+Icon?
+._*
+
 # Editor / Cursor / IDE
 .vscode/
 .cursor/
+
+# Avoid indexing most of the macOS user's home directories from repo root
+/Desktop/
+/Documents/
+/Downloads/
+/Library/
+/Movies/
+/Music/
+/Pictures/
+/Public/
+
+# Shell / local user state (not part of the project)
+.zsh_history
+.zsh_sessions/
+.CFUserTextEncoding
+.cups/
+.idlerc/
+.gitconfig
+.claude/
+
+# Non-bot / tooling (no relacionado con el trading)
+insomnia/
+test_telegram.py
+
+# Local tool installers / binaries (not project code)
+*.exe
+.claude.json
 
 # Build / dist
 build/
