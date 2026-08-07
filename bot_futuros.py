@@ -160,6 +160,10 @@ class StrategyConfig:
     risk_fraction = 0.10             
     max_margin_per_trade_pct = 0.05  
     leverage = 5                     
+
+    # Interruptor de seguridad por drawdown diario (UTC).
+    max_daily_loss_usd = 20.0
+    last_pnl_check_date = None
     
     lateral_rsi_entry = 32.0
     lateral_rsi_exit = 70.0
@@ -775,6 +779,10 @@ def main():
 
     # Se aplica una sola vez por posición para evitar modificaciones repetitivas.
     break_even_applied = False
+
+    # Gate de drawdown diario: si se excede el límite, se evita abrir nuevas operaciones
+    # hasta el próximo día (UTC).
+    daily_drawdown_paused = False
     
     def send_daily_pnl_report() -> None:
         # Reporte para "ayer completo" en hora local del servidor.
@@ -1278,6 +1286,67 @@ def main():
                                     logger.warning(f"[EMERGENCIA] Falló cierre SHORT: {e}", exc_info=True)
             else:
                 # Evitar órdenes huérfanas: cancelamos las existentes antes de abrir
+                # --------------- DRAWdown diario UTC (anti-rachas negativas) ---------------
+                # Se evalúa una vez por día UTC antes de evaluar cualquier entrada nueva.
+                now_utc = datetime.now(pytz.utc)
+                today_utc = now_utc.date()
+
+                if cfg.last_pnl_check_date != today_utc:
+                    cfg.last_pnl_check_date = today_utc
+                    daily_drawdown_paused = False
+
+                    # Calculamos PnL neto del día: sum(realizedPnl) - sum(commission)
+                    day_start_dt = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+                    start_ms = int(day_start_dt.timestamp() * 1000)
+                    end_ms = int(now_utc.timestamp() * 1000)
+
+                    daily_net_pnl = 0.0
+                    fetch_start_ms = start_ms
+                    try:
+                        while True:
+                            batch = client.futures_account_trades(
+                                symbol="BTCUSDT",
+                                startTime=fetch_start_ms,
+                                endTime=end_ms,
+                                limit=1000,
+                            )
+                            if not batch:
+                                break
+
+                            for t in batch:
+                                rp = float(t.get("realizedPnl", 0.0) or 0.0)
+                                comm = float(t.get("commission", 0.0) or 0.0)
+                                daily_net_pnl += rp - comm
+
+                            last_time = batch[-1].get("time")
+                            if last_time is None:
+                                break
+                            last_time_ms = int(last_time)
+
+                            if last_time_ms >= end_ms:
+                                break
+
+                            fetch_start_ms = last_time_ms + 1
+
+                            if len(batch) < 1000:
+                                break
+                    except BinanceAPIException as e_pnl:
+                        logger.warning(f"[DRAWDOWN] No se pudo auditar PnL diario: {e_pnl}", exc_info=True)
+
+                    if daily_net_pnl < (-float(cfg.max_daily_loss_usd)):
+                        logger.critical("CRÍTICO: Límite de Drawdown Diario Alcanzado. Bot en pausa hasta mañana.")
+                        enviar_telegram(
+                            "🚨 *CRÍTICO:* Límite de Drawdown Diario Alcanzado.\n"
+                            "El bot queda en pausa hasta mañana (UTC) para evitar más pérdidas.",
+                            proxies=requests_params.get("proxies"),
+                        )
+                        daily_drawdown_paused = True
+
+                if daily_drawdown_paused:
+                    # Congela aperturas nuevas el resto del día UTC
+                    time.sleep(15)
+                    continue
+
                 client.futures_cancel_all_open_orders(symbol=args.symbol)
 
                 # 5) Reglas de entrada
@@ -1287,7 +1356,15 @@ def main():
                 elif is_alcista and volume_ok and current_rsi <= cfg.bullish_rsi_entry:
                     sl_pct = cfg.sl_bullish_pct
                     tp_pct = cfg.tp_bullish_pct
-                    qty = 0.015
+                    # Position sizing dinámico (usa totalMarginBalance y cfg.risk_fraction)
+                    qty = calculate_position_size(
+                        client=client,
+                        symbol=args.symbol,
+                        entry_price=current_close,
+                        sl_pct=sl_pct,
+                        cfg=cfg,
+                    )
+                    qty = round(float(qty), 3)  # evitar rejections por decimales excesivos
                     logger.info(f"[ENTRY] ALCISTA->LONG qty={qty} sl_pct={sl_pct} tp_pct={tp_pct}")
                     if qty > 0:
                         _place_long_with_stop(
@@ -1303,7 +1380,14 @@ def main():
                 elif is_bajista and volume_ok and current_rsi >= cfg.bearish_rsi_entry:
                     sl_pct = cfg.sl_bearish_pct
                     tp_pct = cfg.tp_bearish_pct
-                    qty = 0.015
+                    qty = calculate_position_size(
+                        client=client,
+                        symbol=args.symbol,
+                        entry_price=current_close,
+                        sl_pct=sl_pct,
+                        cfg=cfg,
+                    )
+                    qty = round(float(qty), 3)  # evitar rejections por rejections de decimales
                     logger.info(f"[ENTRY] BAJISTA->SHORT qty={qty} sl_pct={sl_pct} tp_pct={tp_pct}")
                     if qty > 0:
                         _place_short_with_sl_tp(
