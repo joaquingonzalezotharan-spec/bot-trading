@@ -880,7 +880,8 @@ def main():
                 lookback_seconds=180,
             )
 
-            if abs(position_amt) != 0:
+            valor_posicion = abs(float(position_amt))
+            if valor_posicion > 0.0005:
                 logger.info(f"[LIVE] POSICION ya activa (positionAmt={position_amt}). No abro una nueva.")
                 time.sleep(15)
                 continue
