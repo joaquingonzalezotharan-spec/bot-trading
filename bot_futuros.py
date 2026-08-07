@@ -872,7 +872,7 @@ def main():
             # Validación temprana anti-Rlimit: primero consultamos posición activa.
             pos_info = client.futures_position_information(symbol=args.symbol)
             raw_amt = float(pos_info[0]["positionAmt"]) if pos_info else 0.0
-            position_amt = raw_amt if abs(raw_amt) >= 0.001 else 0.0
+            position_amt = 0.0 if abs(raw_amt) <= 0.0005 else raw_amt
             position_amt = get_effective_position_amt(
                 client,
                 args.symbol,
