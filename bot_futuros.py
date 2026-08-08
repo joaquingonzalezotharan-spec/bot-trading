@@ -109,7 +109,7 @@ def get_effective_position_amt(
                 continue
             if status != "FILLED":
                 continue
-            if o_type not in ("STOP_MARKET", "LIMIT"):
+            if o_type not in ("STOP_MARKET", "STOP", "STOP_LIMIT", "LIMIT"):
                 continue
 
             update_time = o.get("updateTime") or o.get("time")
@@ -1330,7 +1330,7 @@ def main():
 
                     has_reduce_sl_tp_cached = False
                     for o in (open_orders or []):
-                        if o.get("reduceOnly") and o.get("type") in ("STOP_MARKET", "LIMIT"):
+                        if o.get("reduceOnly") and o.get("type") in ("STOP_MARKET", "STOP", "STOP_LIMIT", "LIMIT"):
                             has_reduce_sl_tp_cached = True
                             break
 
