@@ -869,7 +869,11 @@ def main():
         now_ms = int(now_local.timestamp() * 1000)
 
         month_trades: list[dict] = []
-        fetch_month_start_ms = month_start_ms
+        # Binance Futures impone un máximo de ventana temporal por request.
+        # Para evitar APIError(code=-4165) "Maximum time interval is 7 days",
+        # limitamos el arranque como máximo a los últimos 7 días.
+        seven_days_ago_ms = int((time.time() - (7 * 24 * 60 * 60)) * 1000)
+        fetch_month_start_ms = max(month_start_ms, seven_days_ago_ms)
         while True:
             month_batch = client.futures_account_trades(
                 symbol="BTCUSDT",
@@ -927,8 +931,11 @@ def main():
         try:
             # Validación temprana anti-Rlimit: primero consultamos posición activa.
             pos_info = client.futures_position_information(symbol=args.symbol)
-            raw_amt = float(pos_info[0]["positionAmt"]) if pos_info else 0.0
-            position_amt = 0.0 if abs(raw_amt) <= 0.0005 else raw_amt
+            btc_pos = pos_info[0] if pos_info else {}
+            raw_position_amt = float(btc_pos.get("positionAmt", "0") or 0.0)
+            current_position_amt = abs(raw_position_amt)
+            # Tolerancia estricta anti-dust/posiciones fantasma
+            position_amt = 0.0 if current_position_amt <= 0.0001 else raw_position_amt
             position_amt = get_effective_position_amt(
                 client,
                 args.symbol,
@@ -1140,10 +1147,11 @@ def main():
 
             # 4) Verificar posición activa
             pos_info = client.futures_position_information(symbol=args.symbol)
-            # Obtener el valor bruto de la API de Binance
-            raw_amt = float(pos_info[0]["positionAmt"]) if pos_info else 0.0
-            # Aplicar umbral de seguridad: si es menor a 0.001 BTC, forzar a 0.0
-            position_amt = raw_amt if abs(raw_amt) >= 0.001 else 0.0
+            # Obtener el valor bruto de la API de Binance con tolerancia estricta.
+            btc_pos = pos_info[0] if pos_info else {}
+            raw_position_amt = float(btc_pos.get("positionAmt", "0") or 0.0)
+            # Tolerancia anti-dust: <= 0.0001 BTC se considera CERO.
+            position_amt = 0.0 if abs(raw_position_amt) <= 0.0001 else raw_position_amt
             position_amt = get_effective_position_amt(
                 client,
                 args.symbol,
