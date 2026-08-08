@@ -177,9 +177,9 @@ class StrategyConfig:
     bb_std_mult = 2.0
     ema_length = 200
     
-    risk_fraction = 0.10             
-    max_margin_per_trade_pct = 0.05  
-    leverage = 5                     
+    risk_fraction = 0.02               # Riesgo institucional controlado del 2% del capital total
+    max_margin_per_trade_pct = 0.25    # Permite al bot disponer de hasta el 25% del margen para operar
+    leverage = 10                      # Apalancamiento seguro y estándar a x10
 
     # Interruptor de seguridad por drawdown diario (UTC).
     max_daily_loss_usd = 20.0
@@ -191,13 +191,13 @@ class StrategyConfig:
     tp_lateral_pct = 0.0035          
     
     bullish_rsi_entry = 65.0
-    sl_bullish_pct = 0.0035          # Stop Loss tendencial: 0.35%
-    tp_bullish_pct = 0.0065          # Take Profit tendencial: 0.65%
+    sl_bullish_pct = 0.0070          # Stop Loss al 0.70% (Anti-ruido)
+    tp_bullish_pct = 0.0135          # Take Profit al 1.35% (Ratio 2:1)
     
     bearish_rsi_entry = 48.0
     bearish_rsi_exit = 35.0
-    sl_bearish_pct = 0.0040          
-    tp_bearish_pct = 0.0085          # Take Profit tendencial: 0.85%
+    sl_bearish_pct = 0.0070          
+    tp_bearish_pct = 0.0135          # Take Profit al 1.35% (Ratio 2:1)
     
     regime_lookback = 10
     cross_window = 6
