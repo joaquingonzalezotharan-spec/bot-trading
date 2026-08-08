@@ -90,6 +90,26 @@ def get_effective_position_amt(
     try:
         open_orders = client.futures_get_open_orders(symbol=symbol)
         if open_orders:
+            # Ajuste: si existen protecciones reduceOnly, contabilizamos su qty para evitar
+            # desajustes cuando el SL nativo es tipo STOP/STOP_LIMIT.
+            covered_qty_abs = 0.0
+            for o in (open_orders or []):
+                if not o.get("reduceOnly"):
+                    continue
+                o_type = o.get("type")
+                if o_type not in ("STOP", "STOP_LIMIT", "STOP_MARKET", "LIMIT"):
+                    continue
+
+                q_raw = o.get("origQty") or o.get("orig_qty") or o.get("quantity") or o.get("qty") or 0
+                try:
+                    covered_qty_abs += abs(float(q_raw))
+                except Exception:
+                    continue
+
+            if covered_qty_abs > 0:
+                effective_abs = min(abs(position_amt), covered_qty_abs)
+                return math.copysign(effective_abs, position_amt)
+
             return position_amt
     except Exception:
         # Si no podemos consultar, no hacemos suposiciones.
@@ -1360,16 +1380,37 @@ def main():
                                     f"[EMERGENCIA] LONG close inmediato por TP/SL. "
                                     f"entry={entry_price_val} close={current_close} tp_pct={tp_pct} sl_pct={sl_pct}"
                                 )
+                                current_position_amt = abs(float(position_amt))
+                                protecciones_sl_ok = False
                                 try:
-                                    client.futures_create_order(
-                                        symbol=args.symbol,
-                                        side="SELL",
-                                        type="MARKET",
-                                        quantity=abs(position_amt),
-                                        reduceOnly=True,
+                                    open_orders_guard = client.futures_get_open_orders(symbol=args.symbol)
+                                except BinanceAPIException:
+                                    open_orders_guard = []
+
+                                for o in (open_orders_guard or []):
+                                    if o.get("reduceOnly") and o.get("type") in ("STOP", "STOP_LIMIT", "STOP_MARKET"):
+                                        protecciones_sl_ok = True
+                                        break
+
+                                logger.info(
+                                    f"Auditoria de salidas antes de accion: Posicion={current_position_amt} | Protecciones Detectadas Tipo STOP/LIMIT OK={protecciones_sl_ok}"
+                                )
+
+                                if protecciones_sl_ok:
+                                    logger.info(
+                                        "[EMERGENCIA] Se detecto proteccion SL tipo STOP. Se omite cierre MARKET preventivamente."
                                     )
-                                except Exception as e:
-                                    logger.warning(f"[EMERGENCIA] Falló cierre LONG: {e}", exc_info=True)
+                                else:
+                                    try:
+                                        client.futures_create_order(
+                                            symbol=args.symbol,
+                                            side="SELL",
+                                            type="MARKET",
+                                            quantity=abs(position_amt),
+                                            reduceOnly=True,
+                                        )
+                                    except Exception as e:
+                                        logger.warning(f"[EMERGENCIA] Falló cierre LONG: {e}", exc_info=True)
                         else:
                             # SHORT: TP = entry*(1-tp), SL = entry*(1+sl)
                             tp_pct = cfg.tp_bearish_pct
@@ -1383,16 +1424,37 @@ def main():
                                     f"[EMERGENCIA] SHORT close inmediato por TP/SL. "
                                     f"entry={entry_price_val} close={current_close} tp_pct={tp_pct} sl_pct={sl_pct}"
                                 )
+                                current_position_amt = abs(float(position_amt))
+                                protecciones_sl_ok = False
                                 try:
-                                    client.futures_create_order(
-                                        symbol=args.symbol,
-                                        side="BUY",
-                                        type="MARKET",
-                                        quantity=abs(position_amt),
-                                        reduceOnly=True,
+                                    open_orders_guard = client.futures_get_open_orders(symbol=args.symbol)
+                                except BinanceAPIException:
+                                    open_orders_guard = []
+
+                                for o in (open_orders_guard or []):
+                                    if o.get("reduceOnly") and o.get("type") in ("STOP", "STOP_LIMIT", "STOP_MARKET"):
+                                        protecciones_sl_ok = True
+                                        break
+
+                                logger.info(
+                                    f"Auditoria de salidas antes de accion: Posicion={current_position_amt} | Protecciones Detectadas Tipo STOP/LIMIT OK={protecciones_sl_ok}"
+                                )
+
+                                if protecciones_sl_ok:
+                                    logger.info(
+                                        "[EMERGENCIA] Se detecto proteccion SL tipo STOP. Se omite cierre MARKET preventivamente."
                                     )
-                                except Exception as e:
-                                    logger.warning(f"[EMERGENCIA] Falló cierre SHORT: {e}", exc_info=True)
+                                else:
+                                    try:
+                                        client.futures_create_order(
+                                            symbol=args.symbol,
+                                            side="BUY",
+                                            type="MARKET",
+                                            quantity=abs(position_amt),
+                                            reduceOnly=True,
+                                        )
+                                    except Exception as e:
+                                        logger.warning(f"[EMERGENCIA] Falló cierre SHORT: {e}", exc_info=True)
             else:
                 # Evitar órdenes huérfanas: cancelamos las existentes antes de abrir
                 # --------------- DRAWdown diario UTC (anti-rachas negativas) ---------------
