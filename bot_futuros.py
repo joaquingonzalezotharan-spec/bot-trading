@@ -585,6 +585,90 @@ def main():
                 pass
 
     hard_reset_monthly_pnl_cache()
+
+    def enviar_reporte_historico_total() -> None:
+        """
+        Reporte histórico total alineado con la operativa desde un origen fijo hasta el día actual.
+        Importante: Binance Futures limita el intervalo máximo por request (7 días), por eso paginamos.
+        """
+        try:
+            # Origen estimado del sistema (ajustable): 01/01/2025 00:00:00 UTC.
+            origen_dt = datetime(2025, 1, 1, 0, 0, 0, tzinfo=pytz.utc)
+            current_start = int(origen_dt.timestamp() * 1000)
+            now_ms = int(time.time() * 1000)
+
+            if current_start >= now_ms:
+                return
+
+            block_ms = 7 * 24 * 60 * 60 * 1000  # 604800000 ms
+
+            total_trades = 0
+            win_trades = 0
+            loss_trades = 0
+            pnl_bruto = 0.0
+            comisiones = 0.0
+
+            while current_start < now_ms:
+                current_end = min(now_ms, current_start + block_ms)
+                fetch_start = current_start
+
+                # Paginación interna dentro del mismo bloque (si hay más de 1000 trades).
+                while fetch_start < current_end:
+                    month_batch = client.futures_account_trades(
+                        symbol="BTCUSDT",
+                        startTime=fetch_start,
+                        endTime=current_end,
+                        limit=1000,
+                    )
+                    if not month_batch:
+                        break
+
+                    for t in month_batch:
+                        total_trades += 1
+                        rp = float(t.get("realizedPnl", 0.0) or 0.0)
+                        c = float(t.get("commission", 0.0) or 0.0)
+                        pnl_bruto += rp
+                        comisiones += c
+                        if rp >= 0:
+                            win_trades += 1
+                        else:
+                            loss_trades += 1
+
+                    last_time = month_batch[-1].get("time")
+                    if last_time is None:
+                        break
+                    last_time_ms = int(last_time)
+                    if last_time_ms >= current_end:
+                        break
+                    fetch_start = last_time_ms + 1
+
+                    if len(month_batch) < 1000:
+                        break
+
+                current_start = current_end + 1
+
+            fecha_hoy_utc = datetime.now(pytz.utc).strftime("%d/%m/%Y")
+            pnl_neto = float(pnl_bruto) - float(comisiones)
+
+            # Formato institucional sin emojis ni exclamaciones.
+            mensaje = (
+                "*REPORTE DE RENDIMIENTO ALINEADO HISTORICO*\n"
+                f"Periodo: Origen del Sistema - {fecha_hoy_utc}\n"
+                "Par Operativo: BTCUSDT\n"
+                f"• Volumen Total de Trades: {total_trades}\n"
+                f"• PNL Bruto Acumulado: {pnl_bruto:,.4f} USDT\n"
+                f"• Costos de Friccion (Comisiones): -{abs(comisiones):,.4f} USDT\n"
+                f"• RETORNO NETO DE CAPITAL: {pnl_neto:,.4f} USDT"
+            )
+
+            enviar_telegram(mensaje, proxies=requests_params.get("proxies"))
+        except BinanceAPIException as e:
+            logger.warning(f"[HISTORICO] No se pudo generar reporte histórico total: {e}", exc_info=True)
+        except Exception as e:
+            logger.warning(f"[HISTORICO] Error inesperado generando reporte histórico total: {e}", exc_info=True)
+
+    # Ejecución única al arrancar en Render.
+    enviar_reporte_historico_total()
     
     logger.info(f"=== Inicializando bot para {args.symbol} ===")
     
