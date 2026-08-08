@@ -194,7 +194,7 @@ class StrategyConfig:
     sl_bullish_pct = 0.0035          # Stop Loss tendencial: 0.35%
     tp_bullish_pct = 0.0065          # Take Profit tendencial: 0.65%
     
-    bearish_rsi_entry = 55.0
+    bearish_rsi_entry = 48.0
     bearish_rsi_exit = 35.0
     sl_bearish_pct = 0.0040          
     tp_bearish_pct = 0.0085          # Take Profit tendencial: 0.85%
