@@ -886,6 +886,69 @@ def main():
     # Gate de drawdown diario: si se excede el límite, se evita abrir nuevas operaciones
     # hasta el próximo día (UTC).
     daily_drawdown_paused = False
+
+    def force_close_position_market(*, symbol: str, close_side: str, quantity: float) -> None:
+        """
+        Cierre blindado con sincronización:
+        1) Cancelación previa obligatoria de TODAS las órdenes abiertas del símbolo.
+        2) Confirmación (best-effort) de que ya no quedan órdenes abiertas.
+        3) Ejecución de cierre MARKET reduceOnly con manejo de Reduce-only order failed:
+           - Cancelación forzada inmediata de órdenes huérfanas
+           - Reintento después de 1ms
+        """
+        try:
+            logger.info(
+                f"[FORCE_CLOSE] Cancelando órdenes abiertas antes de cierre: symbol={symbol} side={close_side} qty={quantity}"
+            )
+            try:
+                client.futures_cancel_all_open_orders(symbol=symbol)
+            except BinanceAPIException as e_cancel_all:
+                logger.warning(f"[FORCE_CLOSE] Cancel_all_open_orders falló: {e_cancel_all}", exc_info=True)
+
+            # Confirmación best-effort: esperar a que ya no existan órdenes abiertas.
+            for _ in range(5):
+                try:
+                    open_orders_check = client.futures_get_open_orders(symbol=symbol)
+                except BinanceAPIException:
+                    open_orders_check = []
+                if not open_orders_check:
+                    break
+                time.sleep(0.2)
+
+            # Intento de cierre.
+            try:
+                client.futures_create_order(
+                    symbol=symbol,
+                    side=close_side,
+                    type="MARKET",
+                    quantity=quantity,
+                    reduceOnly=True,
+                )
+                return
+            except BinanceAPIException as e_close:
+                if "Reduce-only order failed" not in str(e_close):
+                    raise
+
+                logger.warning(
+                    "[FORCE_CLOSE] Reduce-only order failed. Cancelando órdenes huérfanas y reintentando cierre.",
+                    exc_info=True,
+                )
+                try:
+                    client.futures_cancel_all_open_orders(symbol=symbol)
+                except BinanceAPIException:
+                    pass
+                time.sleep(0.001)
+                client.futures_create_order(
+                    symbol=symbol,
+                    side=close_side,
+                    type="MARKET",
+                    quantity=quantity,
+                    reduceOnly=True,
+                )
+        except BinanceAPIException as e_outer:
+            logger.warning(f"[FORCE_CLOSE] Falló el cierre protegido: {e_outer}", exc_info=True)
+        except Exception as e_general:
+            logger.warning(f"[FORCE_CLOSE] Error inesperado en cierre protegido: {e_general}", exc_info=True)
     
     def send_daily_pnl_report() -> None:
         # Reporte para "ayer completo" en hora local del servidor.
@@ -1401,16 +1464,11 @@ def main():
                                         "[EMERGENCIA] Se detecto proteccion SL tipo STOP. Se omite cierre MARKET preventivamente."
                                     )
                                 else:
-                                    try:
-                                        client.futures_create_order(
-                                            symbol=args.symbol,
-                                            side="SELL",
-                                            type="MARKET",
-                                            quantity=abs(position_amt),
-                                            reduceOnly=True,
-                                        )
-                                    except Exception as e:
-                                        logger.warning(f"[EMERGENCIA] Falló cierre LONG: {e}", exc_info=True)
+                                    force_close_position_market(
+                                        symbol=args.symbol,
+                                        close_side="SELL",
+                                        quantity=abs(position_amt),
+                                    )
                         else:
                             # SHORT: TP = entry*(1-tp), SL = entry*(1+sl)
                             tp_pct = cfg.tp_bearish_pct
@@ -1445,16 +1503,11 @@ def main():
                                         "[EMERGENCIA] Se detecto proteccion SL tipo STOP. Se omite cierre MARKET preventivamente."
                                     )
                                 else:
-                                    try:
-                                        client.futures_create_order(
-                                            symbol=args.symbol,
-                                            side="BUY",
-                                            type="MARKET",
-                                            quantity=abs(position_amt),
-                                            reduceOnly=True,
-                                        )
-                                    except Exception as e:
-                                        logger.warning(f"[EMERGENCIA] Falló cierre SHORT: {e}", exc_info=True)
+                                    force_close_position_market(
+                                        symbol=args.symbol,
+                                        close_side="BUY",
+                                        quantity=abs(position_amt),
+                                    )
             else:
                 # Evitar órdenes huérfanas: cancelamos las existentes antes de abrir
                 # --------------- DRAWdown diario UTC (anti-rachas negativas) ---------------
