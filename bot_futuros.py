@@ -5,6 +5,7 @@ import logging
 import math
 import sys
 from datetime import datetime, timedelta
+import threading
 import pytz
 from urllib.parse import quote
 import pandas as pd
@@ -367,6 +368,58 @@ def set_trade_exits(client, symbol, side, entry_price, qty, tp_pct, sl_pct):
     except Exception as e_general:
         print(f"[ERROR GENERAL EN ÓRDENES DE SALIDA] No se pudo procesar la lógica de TP/SL: {e_general}")
 
+def _compute_tp_sl_usdt_impact_opening(
+    *,
+    side: str,
+    qty_btc: float,
+    entry_price_exec: float,
+    tp_pct: float,
+    sl_pct: float,
+    # Constantes usadas por el bot en el cálculo de fricción (TP) y por la estimación USDT.
+    maker_fee: float = 0.0002,
+    taker_fee: float = 0.0005,
+    friction: float = 0.0007,
+):
+    """
+    Cálculo predictivo (estimación) para mensajería de apertura:
+    - tp_price: precio exacto estimado donde ejecutará el Take Profit (LIMIT).
+    - sl_trigger: precio exacto estimado donde disparará el Stop Loss.
+    - Ganancia/Pérdida estimada en USDT descontando/considerando comisiones.
+    """
+    if side == "LONG":
+        tp_price = round(float(entry_price_exec * (1 + tp_pct + friction)), 1)
+        sl_trigger = round(float(entry_price_exec * (1 - sl_pct)), 1)
+
+        tp_distance = float(tp_price - entry_price_exec)
+        sl_distance = float(entry_price_exec - sl_trigger)
+    elif side == "SHORT":
+        tp_price = round(float(entry_price_exec * (1 - tp_pct - friction)), 1)
+        sl_trigger = round(float(entry_price_exec * (1 + sl_pct)), 1)
+
+        tp_distance = float(entry_price_exec - tp_price)
+        sl_distance = float(sl_trigger - entry_price_exec)
+    else:
+        raise ValueError(f"side inválido para cálculo predictivo: {side}")
+
+    # Tamaño_BTC * distancia_precio (en USDT) con comisiones:
+    # - TP estimado: entrada GTX (maker) + TP LIMIT (maker) => comisión maker en ida y vuelta.
+    # - SL estimado: stop suele ejecutarse de forma más agresiva => usamos comisión taker en ida y vuelta.
+    tp_gross_usdt = float(qty_btc) * tp_distance
+    sl_gross_usdt = float(qty_btc) * sl_distance
+
+    maker_commission_usdt = float(maker_fee) * float(qty_btc) * (float(entry_price_exec) + float(tp_price))
+    taker_commission_usdt = float(taker_fee) * float(qty_btc) * (float(entry_price_exec) + float(sl_trigger))
+
+    tp_net_usdt = tp_gross_usdt - maker_commission_usdt
+    sl_net_usdt = sl_gross_usdt + taker_commission_usdt
+
+    return {
+        "tp_price": tp_price,
+        "sl_trigger": sl_trigger,
+        "tp_net_usdt": tp_net_usdt,
+        "sl_net_usdt": sl_net_usdt,
+    }
+
 def _place_long_with_stop(
     client: Client,
     symbol: str,
@@ -375,6 +428,7 @@ def _place_long_with_stop(
     sl_pct: float,
     tp_pct: float,
     symbol_info: dict,
+    regime: str,
     proxies: dict | None = None,
 ):
     try:
@@ -435,8 +489,18 @@ def _place_long_with_stop(
         
         # Blindaje TP/SL (Stop Limit + TP Limit) con redondeo BTCUSDT paso 0.10.
         friction = 0.0007
-        tp_trigger_price = round(float(entry_price_exec * (1 + tp_pct + friction)), 1)
-        sl_trigger_price = round(float(entry_price_exec * (1 - sl_pct)), 1)
+        impacts = _compute_tp_sl_usdt_impact_opening(
+            side="LONG",
+            qty_btc=float(confirmed_pos_amt),
+            entry_price_exec=float(entry_price_exec),
+            tp_pct=tp_pct,
+            sl_pct=sl_pct,
+            friction=friction,
+        )
+        tp_price = impacts["tp_price"]
+        sl_trigger = impacts["sl_trigger"]
+        tp_net_usdt = impacts["tp_net_usdt"]
+        sl_net_usdt = impacts["sl_net_usdt"]
         set_trade_exits(
             client=client,
             symbol=symbol,
@@ -453,10 +517,13 @@ def _place_long_with_stop(
             "*APERTURA DE POSICION EJECUTADA*\n"
             f"Activo: {symbol}\n"
             "Direccion: LONG\n"
+            f"Regimen detectado: {regime}\n"
             f"Volumen: {volumen_btc:.3f} BTC\n"
             f"Precio de Entrada: {entry_price_exec:,.2f} USDT\n"
-            f"Take Profit: {tp_trigger_price:,.2f} USDT\n"
-            f"Stop Loss: {sl_trigger_price:,.2f} USDT"
+            f"Take Profit (tp_price): {tp_price:,.1f} USDT\n"
+            f"Stop Loss (sl_trigger): {sl_trigger:,.1f} USDT\n"
+            f"Ganancia estimada si toca TP: +{tp_net_usdt:.2f} USDT\n"
+            f"Pérdida estimada si toca SL: -{sl_net_usdt:.2f} USDT"
         )
         enviar_telegram(msg, proxies=proxies)
     except BinanceAPIException as e:
@@ -471,6 +538,7 @@ def _place_short_with_sl_tp(
     sl_pct: float,
     tp_pct: float,
     symbol_info: dict,
+    regime: str,
     proxies: dict | None = None,
 ):
     try:
@@ -531,8 +599,18 @@ def _place_short_with_sl_tp(
         
         # Blindaje TP/SL (Stop Limit + TP Limit) con redondeo BTCUSDT paso 0.10.
         friction = 0.0007
-        tp_trigger_price = round(float(entry_price_exec * (1 - tp_pct - friction)), 1)
-        sl_trigger_price = round(float(entry_price_exec * (1 + sl_pct)), 1)
+        impacts = _compute_tp_sl_usdt_impact_opening(
+            side="SHORT",
+            qty_btc=float(confirmed_pos_amt),
+            entry_price_exec=float(entry_price_exec),
+            tp_pct=tp_pct,
+            sl_pct=sl_pct,
+            friction=friction,
+        )
+        tp_price = impacts["tp_price"]
+        sl_trigger = impacts["sl_trigger"]
+        tp_net_usdt = impacts["tp_net_usdt"]
+        sl_net_usdt = impacts["sl_net_usdt"]
         set_trade_exits(
             client=client,
             symbol=symbol,
@@ -549,10 +627,13 @@ def _place_short_with_sl_tp(
             "*APERTURA DE POSICION EJECUTADA*\n"
             f"Activo: {symbol}\n"
             "Direccion: SHORT\n"
+            f"Regimen detectado: {regime}\n"
             f"Volumen: {volumen_btc:.3f} BTC\n"
             f"Precio de Entrada: {entry_price_exec:,.2f} USDT\n"
-            f"Take Profit: {tp_trigger_price:,.2f} USDT\n"
-            f"Stop Loss: {sl_trigger_price:,.2f} USDT"
+            f"Take Profit (tp_price): {tp_price:,.1f} USDT\n"
+            f"Stop Loss (sl_trigger): {sl_trigger:,.1f} USDT\n"
+            f"Ganancia estimada si toca TP: +{tp_net_usdt:.2f} USDT\n"
+            f"Pérdida estimada si toca SL: -{sl_net_usdt:.2f} USDT"
         )
         enviar_telegram(msg, proxies=proxies)
     except BinanceAPIException as e:
@@ -974,35 +1055,22 @@ def main():
         except Exception as e_general:
             logger.warning(f"[FORCE_CLOSE] Error inesperado en cierre protegido: {e_general}", exc_info=True)
     
-    def send_daily_pnl_report() -> None:
-        # Reporte para "ayer completo" en hora local del servidor.
-        zona_local = pytz.timezone('America/Argentina/Buenos_Aires')
-        now_local = datetime.now(zona_local)
-        yesterday_date = (now_local - timedelta(days=1)).date()
-        start_dt = datetime(
-            yesterday_date.year,
-            yesterday_date.month,
-            yesterday_date.day,
-            0,
-            0,
-            0,
-            tzinfo=now_local.tzinfo,
-        )
-        end_dt = datetime(
-            yesterday_date.year,
-            yesterday_date.month,
-            yesterday_date.day,
-            23,
-            59,
-            59,
-            tzinfo=now_local.tzinfo,
-        )
+    def send_daily_pnl_report(end_dt_utc: datetime) -> None:
+        """
+        Envío de bloque único a Telegram en UTC.
+        - RESUMEN DIARIO: últimas 24 horas con tasa de acierto y PNL neto.
+        - HISTORIAL ACUMULADO GLOBAL: desde el inicio del bot.
+        """
+        start_dt_utc = end_dt_utc - timedelta(days=1)
+        start_ms = int(start_dt_utc.timestamp() * 1000)
+        end_ms = int(end_dt_utc.timestamp() * 1000)
 
-        start_ms = int(start_dt.timestamp() * 1000)
-        end_ms = int(end_dt.timestamp() * 1000)
+        operaciones_cerradas = 0
+        wins = 0
+        losses = 0
+        net_pnl_day = 0.0
 
-        # Consumimos todos los trades del rango usando paginación por timestamp.
-        all_trades: list[dict] = []
+        # ---- 1) Trades de las últimas 24 horas (para win-rate y PNL neto del día) ----
         fetch_start_ms = start_ms
         while True:
             batch = client.futures_account_trades(
@@ -1014,108 +1082,114 @@ def main():
             if not batch:
                 break
 
-            all_trades.extend(batch)
+            for t in batch:
+                rp = float(t.get("realizedPnl", 0.0) or 0.0)
+                if rp == 0.0:
+                    continue
+                commission = float(t.get("commission", 0.0) or 0.0)
+
+                operaciones_cerradas += 1
+                net_pnl_day += rp - commission
+                if rp > 0:
+                    wins += 1
+                elif rp < 0:
+                    losses += 1
 
             last_time = batch[-1].get("time")
             if last_time is None:
                 break
-
             last_time_ms = int(last_time)
             if last_time_ms >= end_ms:
                 break
 
-            # Siguiente página: avanzar 1ms para no repetir el último trade.
             fetch_start_ms = last_time_ms + 1
-
-            # Si el batch ya vino "corto", no hay más páginas.
             if len(batch) < 1000:
                 break
 
-        realized_pnls: list[float] = []
-        for t in all_trades:
-            try:
-                rp = float(t.get("realizedPnl", 0.0) or 0.0)
-            except Exception:
-                rp = 0.0
-            if rp != 0.0:
-                realized_pnls.append(rp)
+        total_decided = wins + losses
+        win_rate = (wins / total_decided) if total_decided > 0 else 0.0
 
-        operaciones_cerradas = len(realized_pnls)
-        ganancias_brutas = sum(p for p in realized_pnls if p > 0)
-        perdidas_brutas = sum(p for p in realized_pnls if p < 0)
-        net_pnl = ganancias_brutas + perdidas_brutas
+        # ---- 2) Historial acumulado global desde inicio del bot ----
+        ganancias_acumuladas_gross = 0.0
+        perdidas_acumuladas_gross = 0.0
+        balance_neto_total = 0.0
 
-        # PnL Mensual: desde el día 1 del mes actual (p.ej. 01/08/2026) hasta HOY.
-        # Se calcula 100% en vivo consultando trades y filtrando por timestamp.
-        month_start_dt = datetime(
-            now_local.year,
-            now_local.month,
-            1,
-            0,
-            0,
-            0,
-            tzinfo=now_local.tzinfo,
-        )
-        month_start_ms = int(month_start_dt.timestamp() * 1000)
-        now_ms = int(now_local.timestamp() * 1000)
-
-        month_trades: list[dict] = []
-        # Binance Futures impone un máximo de ventana temporal por request.
-        # Para evitar APIError(code=-4165) "Maximum time interval is 7 days",
-        # limitamos el arranque como máximo a los últimos 7 días.
-        seven_days_ago_ms = int((time.time() - (7 * 24 * 60 * 60)) * 1000)
-        fetch_month_start_ms = max(month_start_ms, seven_days_ago_ms)
+        fetch_start_ms = bot_start_ts_ms
         while True:
-            month_batch = client.futures_account_trades(
+            batch = client.futures_account_trades(
                 symbol="BTCUSDT",
-                startTime=fetch_month_start_ms,
-                endTime=now_ms,
+                startTime=fetch_start_ms,
+                endTime=end_ms,
                 limit=1000,
             )
-            if not month_batch:
+            if not batch:
                 break
 
-            month_trades.extend(month_batch)
+            for t in batch:
+                rp = float(t.get("realizedPnl", 0.0) or 0.0)
+                if rp == 0.0:
+                    continue
+                commission = float(t.get("commission", 0.0) or 0.0)
 
-            last_time = month_batch[-1].get("time")
+                balance_neto_total += rp - commission
+                if rp > 0:
+                    ganancias_acumuladas_gross += rp
+                elif rp < 0:
+                    perdidas_acumuladas_gross += rp
+
+            last_time = batch[-1].get("time")
             if last_time is None:
                 break
-
             last_time_ms = int(last_time)
-            if last_time_ms >= now_ms:
+            if last_time_ms >= end_ms:
                 break
 
-            fetch_month_start_ms = last_time_ms + 1
-
-            if len(month_batch) < 1000:
+            fetch_start_ms = last_time_ms + 1
+            if len(batch) < 1000:
                 break
-
-        # HARD RESET (hard recompute): reiniciar PnL mensual desde 0.00
-        monthly_net_pnl = 0.0
-        for t in month_trades or []:
-            t_time_ms = int(t.get("time", 0) or 0)
-            if t_time_ms < month_start_ms or t_time_ms > now_ms:
-                continue
-
-            realized_pnl = float(t.get("realizedPnl", 0.0) or 0.0)
-            commission = float(t.get("commission", 0.0) or 0.0)
-            # PnL neto = realizedPnl - commission (Binance Futuros)
-            net_pnl_trade = realized_pnl - commission
-            monthly_net_pnl += net_pnl_trade
-
-        fecha_ayer_str = yesterday_date.strftime("%d/%m/%Y")
 
         mensaje_reporte_diario = (
-            "Bot Futuros: Reporte Diario de Rendimiento\n"
-            f"Periodo analizado: {fecha_ayer_str}\n"
-            f"Operaciones cerradas: {operaciones_cerradas}\n"
-            f"Ganancias brutas: {ganancias_brutas:+.2f} USDT\n"
-            f"Perdidas brutas: {perdidas_brutas:.2f} USDT\n"
-            f"Resultado neto: {net_pnl:+.2f} USDT\n"
-            f"PNL Mensual (Mes actual): {monthly_net_pnl:+.2f} USDT"
+            "Bot Futuros: Reporte Diario (UTC 00:00)\n"
+            f"Ventana: {start_dt_utc.strftime('%d/%m/%Y %H:%M UTC')} -> {end_dt_utc.strftime('%d/%m/%Y %H:%M UTC')}\n"
+            f"Operaciones cerradas (realizedPnl!=0): {operaciones_cerradas}\n"
+            f"Tasa de acierto diaria: {win_rate * 100:.2f}%"
+            f" ({wins}/{total_decided if total_decided > 0 else 0})\n"
+            f"PNL neto del día: {net_pnl_day:+.2f} USDT\n\n"
+            "Historial acumulado global (desde inicio del bot):\n"
+            f"Ganancias acumuladas (gross realizedPnl): {ganancias_acumuladas_gross:+.2f} USDT\n"
+            f"Pérdidas acumuladas (gross realizedPnl): {perdidas_acumuladas_gross:+.2f} USDT\n"
+            f"PNL neto global (realizedPnl - commission): {balance_neto_total:+.2f} USDT"
         )
 
         send_telegram_alert(mensaje_reporte_diario)
+
+    def midnight_report_worker() -> None:
+        last_sent_date = None
+        while True:
+            try:
+                now_utc = datetime.now(pytz.utc)
+                next_midnight_utc = (now_utc + timedelta(days=1)).replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                )
+                sleep_s = (next_midnight_utc - now_utc).total_seconds()
+                if sleep_s > 0:
+                    time.sleep(sleep_s)
+
+                end_dt_utc = datetime.now(pytz.utc).replace(microsecond=0)
+                if last_sent_date == end_dt_utc.date():
+                    continue
+                last_sent_date = end_dt_utc.date()
+
+                send_daily_pnl_report(end_dt_utc=end_dt_utc)
+            except Exception as e:
+                logger.warning(
+                    f"[TELEGRAM] Error en midnight_report_worker: {e}",
+                    exc_info=True,
+                )
+                # Backoff simple para no spamear en caso de fallas.
+                time.sleep(60)
+
+    threading.Thread(target=midnight_report_worker, daemon=True).start()
 
     # Intervalo mecánico fijo
     while True:
@@ -1352,30 +1426,6 @@ def main():
 
             # Reporte a Telegram cada 2 horas (exacto por timestamp, con re-sincronización).
             now_ts = time.time()
-            # --- MODIFICAR EN EL CÓDIGO PRINCIPAL SIN ALTERAR LA POSICIÓN ---
-            zona_local = pytz.timezone('America/Argentina/Buenos_Aires')
-            hora_actual_local = datetime.now(zona_local)
-
-            # Bandera de control para evitar bucles repetidos del reporte en el mismo minuto
-            if not 'reporte_hoy_enviado' in locals():
-                reporte_hoy_enviado = False
-
-            # Restablecer la bandera si cambia de día
-            if hora_actual_local.hour == 0 and hora_actual_local.minute == 0:
-                reporte_hoy_enviado = False
-
-            # CONDICIÓN DE DISPARO INICIAL (Para recibir el reporte de ayer AHORA MISMO al reiniciar)
-            if not 'reporte_inicial_forzado' in locals():
-                print("[REPORTE] Forzando reporte diario inicial de lectura...")
-                send_daily_pnl_report()
-                reporte_inicial_forzado = True
-
-            # Disparo diario automático por horario local de mi país
-            if hora_actual_local.hour == 6 and hora_actual_local.minute == 25 and not reporte_hoy_enviado:
-                print("[REPORTE] Hora local detectada (06:25 AM). Enviando balance diario...")
-                send_daily_pnl_report()
-                reporte_hoy_enviado = True
-            # ---------------------------------------------------------------
             if now_ts >= next_report_ts:
                 try:
                     if abs(position_amt) > 0:
@@ -1624,6 +1674,7 @@ def main():
                             sl_pct,
                             tp_pct,
                             symbol_info,
+                            regime=regime,
                             proxies=requests_params.get("proxies"),
                         )
                 elif is_bajista and volume_ok and current_rsi >= cfg.bearish_rsi_entry:
@@ -1647,6 +1698,7 @@ def main():
                             sl_pct,
                             tp_pct,
                             symbol_info,
+                            regime=regime,
                             proxies=requests_params.get("proxies"),
                         )
 
