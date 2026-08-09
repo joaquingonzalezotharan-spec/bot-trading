@@ -380,14 +380,27 @@ def _place_long_with_stop(
     proxies: dict | None = None,
 ):
     try:
-        logger.info(f"[ORDEN] Abriendo posición LONG en LIMIT. Cantidad: {qty} | price={entry_price}")
+        logger.info(f"[ORDEN] Abriendo posición LONG en LIMIT (Post-Only). Cantidad: {qty} | price_ref={entry_price}")
+
+        # Post-Only GTX: para BUY, colocamos en el mejor bid del order book (maker en bloque pasivo).
+        entry_limit_price = float(entry_price)
+        try:
+            order_book = client.futures_order_book(symbol=symbol, limit=5)
+            best_bid = None
+            if order_book and order_book.get("bids"):
+                best_bid = float(order_book["bids"][0][0])
+            if best_bid is not None and symbol_info:
+                entry_limit_price = round_price(best_bid, symbol_info)
+        except Exception as e_ob:
+            logger.warning(f"[ORDEN] No se pudo obtener order book para LONG; usando entry_price: {e_ob}", exc_info=True)
+
         entry_order = client.futures_create_order(
             symbol=symbol,
             side="BUY",
             type="LIMIT",
-            timeInForce="GTC",
+            timeInForce="GTX",
             quantity=qty,
-            price=str(entry_price),
+            price=str(entry_limit_price),
         )
         order_id = entry_order.get("orderId")
 
@@ -463,14 +476,27 @@ def _place_short_with_sl_tp(
     proxies: dict | None = None,
 ):
     try:
-        logger.info(f"[ORDEN] Abriendo posición SHORT en LIMIT. Cantidad: {qty} | price={entry_price}")
+        logger.info(f"[ORDEN] Abriendo posición SHORT en LIMIT (Post-Only). Cantidad: {qty} | price_ref={entry_price}")
+
+        # Post-Only GTX: para SELL, colocamos en el mejor ask del order book (maker en bloque pasivo).
+        entry_limit_price = float(entry_price)
+        try:
+            order_book = client.futures_order_book(symbol=symbol, limit=5)
+            best_ask = None
+            if order_book and order_book.get("asks"):
+                best_ask = float(order_book["asks"][0][0])
+            if best_ask is not None and symbol_info:
+                entry_limit_price = round_price(best_ask, symbol_info)
+        except Exception as e_ob:
+            logger.warning(f"[ORDEN] No se pudo obtener order book para SHORT; usando entry_price: {e_ob}", exc_info=True)
+
         entry_order = client.futures_create_order(
             symbol=symbol,
             side="SELL",
             type="LIMIT",
-            timeInForce="GTC",
+            timeInForce="GTX",
             quantity=qty,
-            price=str(entry_price),
+            price=str(entry_limit_price),
         )
         order_id = entry_order.get("orderId")
 
