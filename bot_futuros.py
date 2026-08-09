@@ -172,35 +172,33 @@ def enviar_telegram(mensaje: str, *, proxies: dict | None = None) -> None:
 # CONFIGURACIÓN DE LA ESTRATEGIA (StrategyConfig)
 # =====================================================================
 class StrategyConfig:
+    # Parámetros Base de Conexión y Capital (Optimizados para 432 USDT)
+    leverage = 15                       # Apalancamiento de eficiencia para Day Trading en Isolated
+    max_margin_per_trade_pct = 0.30     # Permite usar hasta el 30% del margen para respaldar la posición
+    risk_fraction = 0.03                # Riesgo controlado del 3% del capital total por operación
+
+    # Configuración de Tendencia e Indicadores Técnicos
+    ema_length = 200
     rsi_length = 14
     bb_length = 20
     bb_std_mult = 2.0
-    ema_length = 200
-    
-    risk_fraction = 0.02               # Riesgo institucional controlado del 2% del capital total
-    max_margin_per_trade_pct = 0.25    # Permite al bot disponer de hasta el 25% del margen para operar
-    leverage = 10                      # Apalancamiento seguro y estándar a x10
 
-    # Interruptor de seguridad por drawdown diario (UTC).
-    max_daily_loss_usd = 20.0
+    # Límites Filtro de Entrada RSI (Entradas confirmadas fuera de zonas de agotamiento)
+    bullish_rsi_entry = 62.0
+    bearish_rsi_entry = 45.0
+
+    # Gestión de Salidas Avanzada ALCISTA (LONG) - Objetivos de Rango Amplio
+    sl_bullish_pct = 0.0120             # Stop Loss al 1.20% (Protección contra volatilidad y ruido)
+    tp_bullish_pct = 0.0280             # Take Profit al 2.80% (Ratio Beneficio/Riesgo optimizado 2.33:1)
+
+    # Gestión de Salidas Avanzada BAJISTA (SHORT) - Objetivos de Rango Amplio
+    sl_bearish_pct = 0.0120             # Stop Loss al 1.20%
+    tp_bearish_pct = 0.0280             # Take Profit al 2.80%
+
+    # Cortafuegos y Protección Sistémica
+    max_daily_loss_usd = 25.0           # Freno de emergencia diario incrementado proporcionalmente
     last_pnl_check_date = None
-    
-    lateral_rsi_entry = 32.0
-    lateral_rsi_exit = 70.0
-    sl_lateral_pct = 0.0040          
-    tp_lateral_pct = 0.0035          
-    
-    bullish_rsi_entry = 65.0
-    sl_bullish_pct = 0.0070          # Stop Loss al 0.70% (Anti-ruido)
-    tp_bullish_pct = 0.0135          # Take Profit al 1.35% (Ratio 2:1)
-    
-    bearish_rsi_entry = 48.0
-    bearish_rsi_exit = 35.0
-    sl_bearish_pct = 0.0070          
-    tp_bearish_pct = 0.0135          # Take Profit al 1.35% (Ratio 2:1)
-    
     regime_lookback = 10
-    cross_window = 6
 # =====================================================================
 # CÁLCULO DE INDICADORES (prepare_indicators)
 # =====================================================================
