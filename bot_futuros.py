@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 # =====================================================================
 # Pérdida máxima fija estimada en USD por operación (bajo el SL configurado).
 RISK_PER_TRADE = 7.5
+FEE_FRICTION = 0.0007  # fricción fija usada para TP (maker+taker adjustment)
 
 
 def calculate_qty_fixed_risk(
@@ -188,13 +189,13 @@ class StrategyConfig:
     bullish_rsi_entry = 62.0
     bearish_rsi_entry = 45.0
 
-    # Gestión de Salidas Avanzada ALCISTA (LONG) - Objetivos de Rango Amplio
-    sl_bullish_pct = 0.0120             # Stop Loss al 1.20% (Protección contra volatilidad y ruido)
-    tp_bullish_pct = 0.0280             # Take Profit al 2.80% (Ratio Beneficio/Riesgo optimizado 2.33:1)
+    # Gestión de Salidas Avanzada ALCISTA (LONG) - Objetivos de Rango Cercano (Opción A: reducir a la mitad)
+    sl_bullish_pct = 0.0060             # Stop Loss al 0.60%
+    tp_bullish_pct = 0.0140             # Take Profit al 1.40% (mantiene R:R ≈ 2.33)
 
-    # Gestión de Salidas Avanzada BAJISTA (SHORT) - Objetivos de Rango Amplio
-    sl_bearish_pct = 0.0120             # Stop Loss al 1.20%
-    tp_bearish_pct = 0.0280             # Take Profit al 2.80%
+    # Gestión de Salidas Avanzada BAJISTA (SHORT) - Objetivos de Rango Cercano (Opción A)
+    sl_bearish_pct = 0.0060             # Stop Loss al 0.60%
+    tp_bearish_pct = 0.0140             # Take Profit al 1.40%
 
     # Cortafuegos y Protección Sistémica
     max_daily_loss_usd = 25.0           # Freno de emergencia diario incrementado proporcionalmente
@@ -287,8 +288,8 @@ def estimate_fee_friction_rate() -> float:
     """
     maker_fee = 0.0002  # 0.02%
     taker_fee = 0.0005  # 0.05%
-    logger.info(f"[FEES] Maker={maker_fee:.6f} Taker={taker_fee:.6f} | friction_used=0.0007")
-    return 0.0007
+    logger.info(f"[FEES] Maker={maker_fee:.6f} Taker={taker_fee:.6f} | friction_used={FEE_FRICTION:.6f}")
+    return float(FEE_FRICTION)
 
 def set_trade_exits(client, symbol, side, entry_price, qty, tp_pct, sl_pct):
     """
@@ -378,7 +379,7 @@ def _compute_tp_sl_usdt_impact_opening(
     # Constantes usadas por el bot en el cálculo de fricción (TP) y por la estimación USDT.
     maker_fee: float = 0.0002,
     taker_fee: float = 0.0005,
-    friction: float = 0.0007,
+    friction: float = FEE_FRICTION,
 ):
     """
     Cálculo predictivo (estimación) para mensajería de apertura:
@@ -488,7 +489,7 @@ def _place_long_with_stop(
             return
         
         # Blindaje TP/SL (Stop Limit + TP Limit) con redondeo BTCUSDT paso 0.10.
-        friction = 0.0007
+        friction = FEE_FRICTION
         impacts = _compute_tp_sl_usdt_impact_opening(
             side="LONG",
             qty_btc=float(confirmed_pos_amt),
@@ -598,7 +599,7 @@ def _place_short_with_sl_tp(
             return
         
         # Blindaje TP/SL (Stop Limit + TP Limit) con redondeo BTCUSDT paso 0.10.
-        friction = 0.0007
+        friction = FEE_FRICTION
         impacts = _compute_tp_sl_usdt_impact_opening(
             side="SHORT",
             qty_btc=float(confirmed_pos_amt),
