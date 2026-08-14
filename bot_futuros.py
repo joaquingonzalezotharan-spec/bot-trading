@@ -376,9 +376,7 @@ def _compute_tp_sl_usdt_impact_opening(
     entry_price_exec: float,
     tp_pct: float,
     sl_pct: float,
-    # Constantes usadas por el bot en el cálculo de fricción (TP) y por la estimación USDT.
-    maker_fee: float = 0.0002,
-    taker_fee: float = 0.0005,
+    # Constante de fricción única usada para estimar impacto (TP/SL).
     friction: float = FEE_FRICTION,
 ):
     """
@@ -402,17 +400,18 @@ def _compute_tp_sl_usdt_impact_opening(
     else:
         raise ValueError(f"side inválido para cálculo predictivo: {side}")
 
-    # Tamaño_BTC * distancia_precio (en USDT) con comisiones:
-    # - TP estimado: entrada GTX (maker) + TP LIMIT (maker) => comisión maker en ida y vuelta.
-    # - SL estimado: stop suele ejecutarse de forma más agresiva => usamos comisión taker en ida y vuelta.
+    # Tamaño_BTC * distancia_precio (en USDT) con fricción única:
     tp_gross_usdt = float(qty_btc) * tp_distance
     sl_gross_usdt = float(qty_btc) * sl_distance
 
-    maker_commission_usdt = float(maker_fee) * float(qty_btc) * (float(entry_price_exec) + float(tp_price))
-    taker_commission_usdt = float(taker_fee) * float(qty_btc) * (float(entry_price_exec) + float(sl_trigger))
+    # Usamos una fricción única `friction` para estimar coste total asociado a ejecución.
+    # Calculamos comisión estimada como: friction * qty * (precio_entrada + precio_objetivo)
+    # (aproximación para ida+vuelta aplicada consistentemente).
+    tp_commission_usdt = float(friction) * float(qty_btc) * (float(entry_price_exec) + float(tp_price))
+    sl_commission_usdt = float(friction) * float(qty_btc) * (float(entry_price_exec) + float(sl_trigger))
 
-    tp_net_usdt = tp_gross_usdt - maker_commission_usdt
-    sl_net_usdt = sl_gross_usdt + taker_commission_usdt
+    tp_net_usdt = tp_gross_usdt - tp_commission_usdt
+    sl_net_usdt = sl_gross_usdt + sl_commission_usdt
 
     return {
         "tp_price": tp_price,
@@ -1221,13 +1220,39 @@ def main():
                 direccion_cerrada = "LONG" if prev_position_amt_signed > 0 else "SHORT"
 
                 try:
-                    # Dar tiempo a Binance para reflejar realizedPnl/price del cierre
-                    time.sleep(2)
-                    trades = client.futures_account_trades(symbol="BTCUSDT", limit=5)
-                    ultimo_trade = trades[0] if trades else None
-                    if ultimo_trade:
+                    # Búsqueda robusta del trade de cierre real (polling con reintentos).
+                    # Marcamos el instante de detección en UTC (ms) para comparar timestamps.
+                    detection_ts_ms = int(datetime.now(pytz.utc).timestamp() * 1000)
+                    found_trade = None
+                    max_attempts = 5
+                    attempt = 0
+                    while attempt < max_attempts and found_trade is None:
+                        trades = client.futures_account_trades(symbol=args.symbol, limit=50)
+                        # Buscar trades recientes (últimos segundos) y con realizedPnl distinto de 0
+                        for t in trades or []:
+                            try:
+                                t_time = int(t.get("time", 0) or 0)
+                            except Exception:
+                                t_time = 0
+                            # Aceptamos trades cuyo timestamp sea >= detection_ts_ms - 5000ms (5s)
+                            if t_time >= (detection_ts_ms - 5000):
+                                try:
+                                    rp_val = float(t.get("realizedPnl", 0.0) or 0.0)
+                                except Exception:
+                                    rp_val = 0.0
+                                if rp_val != 0.0:
+                                    # Candidate: confirmed realized pnl trade within time window
+                                    found_trade = t
+                                    break
+                        if found_trade:
+                            break
+                        attempt += 1
+                        time.sleep(2)  # reintento cada 2s (hasta ~10s)
+
+                    if found_trade:
+                        ultimo_trade = found_trade
                         pnl_realizado = float(ultimo_trade.get("realizedPnl", 0.0) or 0.0)
-                        # price suele representar el precio de ejecución del último fill/transaction
+                        # Precio de ejecución: preferimos 'price' o 'avgPrice' del trade confirmado.
                         precio_salida = ultimo_trade.get("price") or ultimo_trade.get("avgPrice") or ultimo_trade.get("avg_price")
                         try:
                             precio_salida = float(precio_salida) if precio_salida is not None else None
@@ -1246,6 +1271,14 @@ def main():
                             comision_total = abs(comision_total_raw)
                         except Exception:
                             comision_total = 0.0
+                    else:
+                        # Fallback: no hubo trade confirmado en el timeout
+                        pnl_realizado = 0.0
+                        precio_salida = None
+                        cantidad_total = 0.0
+                        comision_total = 0.0
+                        # Enviar aviso de espera a Telegram para no dar información errónea
+                        send_telegram_alert("Ejecución en curso (esperando confirmación de Binance)")
                 except Exception:
                     pnl_realizado = 0.0
                     precio_salida = None
