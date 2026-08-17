@@ -24,6 +24,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Timestamp of last closed trade (used to enforce cooldown after closes)
+last_trade_close_ts = 0.0
+# Timestamp of last cooldown log to avoid spamming logs
+last_cooldown_log_ts = 0.0
+
 # =====================================================================
 # RIESGO FIJO POR OPERACIÓN (USD)
 # =====================================================================
@@ -646,6 +651,7 @@ def _place_short_with_sl_tp(
 # LOOP PRINCIPAL Y ARRANQUE
 # =====================================================================
 def main():
+    global last_trade_close_ts, last_cooldown_log_ts
     parser = argparse.ArgumentParser()
     parser.add_argument('--symbol', default='BTCUSDT')
     parser.add_argument('--interval', default='5m')
@@ -688,8 +694,6 @@ def main():
         proxies=requests_params.get("proxies"),
     )
     bot_start_ts_ms = int(time.time() * 1000)
-    # Timestamp of last closed trade (used to enforce cooldown after closes)
-    last_trade_close_ts = 0.0
 
     def hard_reset_monthly_pnl_cache() -> None:
         # Seguridad anti-persistencia física (caché viejo corrupto).
@@ -1217,8 +1221,12 @@ def main():
             try:
                 if last_trade_close_ts and (time.time() - last_trade_close_ts) < (15 * 60):
                     wait_left = int((15 * 60) - (time.time() - last_trade_close_ts))
-                    logger.info(f"[COOLDOWN] Esperando {wait_left}s tras cierre antes de reevaluar.")
-                    time.sleep(min(15, wait_left))
+                    now_ts = time.time()
+                    # Log cooldown status at most once per 60 seconds to avoid log spam.
+                    if (now_ts - last_cooldown_log_ts) >= 60:
+                        logger.info(f"[COOLDOWN] {wait_left}s remaining since last close; skipping evaluation.")
+                        last_cooldown_log_ts = now_ts
+                    # Skip active evaluation cycle immediately (no sleep) to keep bot responsive.
                     continue
             except Exception:
                 # If any problem evaluating cooldown, proceed normally.
