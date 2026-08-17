@@ -666,6 +666,9 @@ def main():
             "WARNING: Credenciales Binance no configuradas (BINANCE_API_KEY/BINANCE_API_SECRET). "
             "El bot continuará en modo no garantizado, pero no abortará el contenedor."
         )
+    # Scan interval (seconds) between main loop iterations — keep between 5 and 10s.
+    scan_interval = 7
+    logger.info(f"[CONFIG] Scan interval fijado a {scan_interval}s (recomendado 5-10s).")
     # -----------------------------
     # PROXY (HTTP autenticado) para Binance Futures
     # -----------------------------
@@ -1370,8 +1373,10 @@ def main():
                             ticker = client.futures_symbol_ticker(symbol=args.symbol)
                             current_px = float(ticker.get("price"))
 
-                            break_even_trigger_pct = 0.0030  # +0.30% a favor
-                            break_even_offset = entry_price_val * 0.0007
+                            # Trigger break-even only on meaningful moves (>= 0.4%)
+                            break_even_trigger_pct = 0.0040  # +0.40% a favor
+                            # Add small offset to stop loss to cover fees (~0.10%)
+                            break_even_offset = entry_price_val * 0.001
                             stop_px = round(float(entry_price_val + break_even_offset), 1)  # tick BTCUSDT=0.10
 
                             should_move = (
@@ -1427,7 +1432,7 @@ def main():
                     except BinanceAPIException as e_be:
                         logger.warning(f"[BREAKEVEN] Error Binance en break-even monitor: {e_be}", exc_info=True)
 
-                time.sleep(15)
+                time.sleep(scan_interval)
                 continue
 
             # 1) Descargar klines recientes
@@ -1462,7 +1467,7 @@ def main():
             df_ind = prepare_indicators(df, cfg)
             if df_ind.empty:
                 logger.warning("[LIVE] prepare_indicators devolvió DataFrame vacío. Saltando ciclo.")
-                time.sleep(15)
+                time.sleep(scan_interval)
                 continue
 
             # 3) Régimen
@@ -1740,8 +1745,8 @@ def main():
                         daily_drawdown_paused = True
 
                 if daily_drawdown_paused:
-                    # Congela aperturas nuevas el resto del día UTC
-                    time.sleep(15)
+                # Congela aperturas nuevas el resto del día UTC
+                    time.sleep(scan_interval)
                     continue
 
                 client.futures_cancel_all_open_orders(symbol=args.symbol)
@@ -1853,7 +1858,7 @@ def main():
                             proxies=requests_params.get("proxies"),
                         )
 
-            time.sleep(15)
+            time.sleep(scan_interval)
         except KeyboardInterrupt:
             logger.info("Bot detenido por el usuario.")
             break
