@@ -177,7 +177,7 @@ def enviar_telegram(mensaje: str, *, proxies: dict | None = None) -> None:
 # =====================================================================
 class StrategyConfig:
     # Parámetros Base de Conexión y Capital (Optimizados para 432 USDT)
-    leverage = 15                       # Apalancamiento de eficiencia para Day Trading en Isolated
+    leverage = 5                        # Apalancamiento reducido a 5x en ISOLATED
     max_margin_per_trade_pct = 0.30     # Permite usar hasta el 30% del margen para respaldar la posición
     risk_fraction = 0.03                # Riesgo controlado del 3% del capital total por operación
 
@@ -688,6 +688,8 @@ def main():
         proxies=requests_params.get("proxies"),
     )
     bot_start_ts_ms = int(time.time() * 1000)
+    # Timestamp of last closed trade (used to enforce cooldown after closes)
+    last_trade_close_ts = 0.0
 
     def hard_reset_monthly_pnl_cache() -> None:
         # Seguridad anti-persistencia física (caché viejo corrupto).
@@ -1211,6 +1213,16 @@ def main():
             )
 
             valor_posicion = abs(float(position_amt))
+            # Enforce cooldown after a recent close to avoid overtrading (15 minutes).
+            try:
+                if last_trade_close_ts and (time.time() - last_trade_close_ts) < (15 * 60):
+                    wait_left = int((15 * 60) - (time.time() - last_trade_close_ts))
+                    logger.info(f"[COOLDOWN] Esperando {wait_left}s tras cierre antes de reevaluar.")
+                    time.sleep(min(15, wait_left))
+                    continue
+            except Exception:
+                # If any problem evaluating cooldown, proceed normally.
+                pass
 
             # --------------- Detección de cierre (persistente) ---------------
             current_position_amt = abs(float(position_amt))
@@ -1301,6 +1313,11 @@ def main():
                     f"• Balance Neto: {float(resultado_neto):+.4f} USDT"
                 )
                 send_telegram_alert(mensaje_cierre)
+                # mark last close timestamp for cooldown enforcement
+                try:
+                    last_trade_close_ts = time.time()
+                except Exception:
+                    pass
 
                 # Reset de estado interno tras cierre para evitar bucles/ruido.
                 had_position = False
@@ -1444,10 +1461,25 @@ def main():
                 volume_ok = np.isfinite(vol_ref) and (current_volume > (vol_ref * 1.15))
             except Exception:
                 volume_ok = False
+            # compute Bollinger channel distances for lateral spread filter
+            try:
+                bb_upper = float(last_row.get("bb_upper", float("nan")))
+                bb_lower = float(last_row.get("bb_lower", float("nan")))
+                spread_ok = False
+                if np.isfinite(bb_upper) and np.isfinite(bb_lower) and bb_upper > 0 and bb_lower > 0:
+                    dist_up = abs(bb_upper - current_close) / bb_upper
+                    dist_low = abs(current_close - bb_lower) / bb_lower
+                    min_dist = min(dist_up, dist_low)
+                    spread_ok = (min_dist >= 0.006)  # at least 0.60%
+                else:
+                    spread_ok = False
+            except Exception:
+                spread_ok = False
             print(
                 f"[LIVE] Revisando mercado real... "
                 f"Régimen detectado: ALCISTA ({is_alcista}) / BAJISTA ({is_bajista}) / LATERAL ({is_lateral}) | "
                 f"VolumenOK={volume_ok} | Vol={current_volume:.6f} | VolAvg20={vol_avg20:.6f} | "
+                f"SpreadOK={spread_ok} | "
                 f"Close={current_close:.6f} | RSI={current_rsi:.2f}",
                 flush=True,
             )
@@ -1692,10 +1724,10 @@ def main():
 
                 # 5) Reglas de entrada
                 if is_lateral:
-                    # In lateral markets allow trades only on RSI extremes:
-                    # - Buy only if RSI < 30 (oversold) AND volume_ok
-                    # - Sell only if RSI > 70 (overbought) AND volume_ok
-                    if current_rsi < 30 and volume_ok:
+                    # In lateral markets allow trades only on RSI extremes with spread filter:
+                    # - Buy only if RSI <= 25 (deep oversold) AND volume_ok AND spread_ok
+                    # - Sell only if RSI >= 75 (deep overbought) AND volume_ok AND spread_ok
+                    if current_rsi <= 25 and volume_ok and spread_ok:
                         sl_pct = cfg.sl_bullish_pct
                         tp_pct = cfg.tp_bullish_pct
                         qty = calculate_position_size(
@@ -1720,7 +1752,7 @@ def main():
                                 regime=regime,
                                 proxies=requests_params.get("proxies"),
                             )
-                    elif current_rsi > 70 and volume_ok:
+                    elif current_rsi >= 75 and volume_ok and spread_ok:
                         sl_pct = cfg.sl_bearish_pct
                         tp_pct = cfg.tp_bearish_pct
                         qty = calculate_position_size(
