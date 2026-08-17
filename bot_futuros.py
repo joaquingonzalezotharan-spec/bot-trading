@@ -669,6 +669,9 @@ def main():
     # Scan interval (seconds) between main loop iterations — keep between 5 and 10s.
     scan_interval = 7
     logger.info(f"[CONFIG] Scan interval fijado a {scan_interval}s (recomendado 5-10s).")
+    # Cooldown after a detected close (seconds). Can be overridden via environment.
+    cooldown_seconds = int(os.environ.get("COOLDOWN_SECONDS", "90"))
+    logger.info(f"[CONFIG] Cooldown tras cierre fijado a {cooldown_seconds}s (por defecto 90s).")
     # -----------------------------
     # PROXY (HTTP autenticado) para Binance Futures
     # -----------------------------
@@ -1224,10 +1227,10 @@ def main():
             )
 
             valor_posicion = abs(float(position_amt))
-            # Enforce cooldown after a recent close to avoid overtrading (15 minutes).
+            # Enforce cooldown after a recent close to avoid overtrading.
             try:
-                if last_trade_close_ts and (time.time() - last_trade_close_ts) < (15 * 60):
-                    wait_left = int((15 * 60) - (time.time() - last_trade_close_ts))
+                if last_trade_close_ts and (time.time() - last_trade_close_ts) < cooldown_seconds:
+                    wait_left = int(cooldown_seconds - (time.time() - last_trade_close_ts))
                     now_ts = time.time()
                     # Log cooldown status at most once per 60 seconds to avoid log spam.
                     if (now_ts - last_cooldown_log_ts) >= 60:
