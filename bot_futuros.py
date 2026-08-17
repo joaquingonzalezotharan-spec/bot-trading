@@ -993,6 +993,10 @@ def main():
     prev_position_amt = 0.0
     prev_position_amt_signed = 0.0
 
+    # State tracking to avoid log spam when a position is continuously detected.
+    estado_posicion_previo = False
+    last_logged_position_amt = 0.0
+
     # Se aplica una sola vez por posición para evitar modificaciones repetitivas.
     break_even_applied = False
 
@@ -1338,7 +1342,19 @@ def main():
             prev_position_amt_signed = float(position_amt)
             # ---------------------------------------------------------------
             if valor_posicion > 0.0005:
-                logger.info(f"[LIVE] POSICION ya activa (positionAmt={position_amt}). No abro una nueva.")
+                # State-tracking: log the "position active" message only once when the
+                # position is first detected or when the position amount materially changes.
+                try:
+                    current_amt = float(position_amt)
+                except Exception:
+                    current_amt = float(prev_position_amt)
+
+                amt_changed = abs(current_amt - last_logged_position_amt) > max(0.0001, abs(last_logged_position_amt) * 0.01)
+
+                if (not estado_posicion_previo) or amt_changed:
+                    logger.info(f"[LIVE] POSICION ya activa (positionAmt={position_amt}). No abro una nueva.")
+                    estado_posicion_previo = True
+                    last_logged_position_amt = current_amt
                 # Break-even protection (monitor intermedio sin tocar indicadores/régimen)
                 if not break_even_applied:
                     try:
