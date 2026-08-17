@@ -1436,8 +1436,14 @@ def main():
             is_alcista = regime == "ALCISTA"
             is_bajista = regime == "BAJISTA"
             is_lateral = regime == "LATERAL"
-            vol_ref = vol_avg5 if is_lateral else vol_avg20
-            volume_ok = np.isfinite(vol_ref) and current_volume >= (vol_ref * 0.5)
+            # Use strict 20-period volume filter for all regimes.
+            # Require current volume at least 15% above the 20-period moving average.
+            vol_ref = vol_avg20
+            volume_ok = False
+            try:
+                volume_ok = np.isfinite(vol_ref) and (current_volume > (vol_ref * 1.15))
+            except Exception:
+                volume_ok = False
             print(
                 f"[LIVE] Revisando mercado real... "
                 f"Régimen detectado: ALCISTA ({is_alcista}) / BAJISTA ({is_bajista}) / LATERAL ({is_lateral}) | "
@@ -1686,8 +1692,61 @@ def main():
 
                 # 5) Reglas de entrada
                 if is_lateral:
-                    # LATERAL deshabilitado: no abrir operaciones bajo ninguna circunstancia.
-                    pass
+                    # In lateral markets allow trades only on RSI extremes:
+                    # - Buy only if RSI < 30 (oversold) AND volume_ok
+                    # - Sell only if RSI > 70 (overbought) AND volume_ok
+                    if current_rsi < 30 and volume_ok:
+                        sl_pct = cfg.sl_bullish_pct
+                        tp_pct = cfg.tp_bullish_pct
+                        qty = calculate_position_size(
+                            client=client,
+                            symbol=args.symbol,
+                            entry_price=current_close,
+                            sl_pct=sl_pct,
+                            cfg=cfg,
+                        )
+                        qty = round(float(qty), 3)
+                        logger.info(f"[ENTRY] LATERAL->LONG qty={qty} sl_pct={sl_pct} tp_pct={tp_pct}")
+                        if qty > 0:
+                            # Use the LIMIT (post-only) entry function to favor maker fees.
+                            _place_long_with_stop(
+                                client,
+                                args.symbol,
+                                qty,
+                                current_close,
+                                sl_pct,
+                                tp_pct,
+                                symbol_info,
+                                regime=regime,
+                                proxies=requests_params.get("proxies"),
+                            )
+                    elif current_rsi > 70 and volume_ok:
+                        sl_pct = cfg.sl_bearish_pct
+                        tp_pct = cfg.tp_bearish_pct
+                        qty = calculate_position_size(
+                            client=client,
+                            symbol=args.symbol,
+                            entry_price=current_close,
+                            sl_pct=sl_pct,
+                            cfg=cfg,
+                        )
+                        qty = round(float(qty), 3)
+                        logger.info(f"[ENTRY] LATERAL->SHORT qty={qty} sl_pct={sl_pct} tp_pct={tp_pct}")
+                        if qty > 0:
+                            _place_short_with_sl_tp(
+                                client,
+                                args.symbol,
+                                qty,
+                                current_close,
+                                sl_pct,
+                                tp_pct,
+                                symbol_info,
+                                regime=regime,
+                                proxies=requests_params.get("proxies"),
+                            )
+                    else:
+                        # RSI in [30,70] or volume insufficient: ignore lateral market.
+                        pass
                 elif is_alcista and volume_ok and current_rsi <= cfg.bullish_rsi_entry:
                     sl_pct = cfg.sl_bullish_pct
                     tp_pct = cfg.tp_bullish_pct
