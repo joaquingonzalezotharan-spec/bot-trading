@@ -34,7 +34,7 @@ last_cooldown_log_ts = 0.0
 # =====================================================================
 # Pérdida máxima fija estimada en USD por operación (bajo el SL configurado).
 RISK_PER_TRADE = 7.5
-FEE_FRICTION = 0.0007  # fricción fija usada para TP (maker+taker adjustment)
+FEE_FRICTION = float(os.environ.get("FEE_FRICTION", "0.0007"))  # fricción fija usada para TP (maker+taker adjustment)
 
 
 def calculate_qty_fixed_risk(
@@ -181,33 +181,50 @@ def enviar_telegram(mensaje: str, *, proxies: dict | None = None) -> None:
 # CONFIGURACIÓN DE LA ESTRATEGIA (StrategyConfig)
 # =====================================================================
 class StrategyConfig:
-    # Parámetros Base de Conexión y Capital (Optimizados para 432 USDT)
-    leverage = 5                        # Apalancamiento reducido a 5x en ISOLATED
-    max_margin_per_trade_pct = 0.30     # Permite usar hasta el 30% del margen para respaldar la posición
-    risk_fraction = 0.03                # Riesgo controlado del 3% del capital total por operación
+    """
+    Configuración de la estrategia.
+    Valores por defecto pueden ser sobreescritos mediante variables de entorno.
+    """
+    def __init__(self):
+        def _get_int(name, default):
+            v = os.environ.get(name)
+            try:
+                return int(v) if v is not None else int(default)
+            except Exception:
+                return int(default)
 
-    # Configuración de Tendencia e Indicadores Técnicos
-    ema_length = 200
-    rsi_length = 14
-    bb_length = 20
-    bb_std_mult = 2.0
+        def _get_float(name, default):
+            v = os.environ.get(name)
+            try:
+                return float(v) if v is not None else float(default)
+            except Exception:
+                return float(default)
 
-    # Límites Filtro de Entrada RSI (Entradas confirmadas fuera de zonas de agotamiento)
-    bullish_rsi_entry = 62.0
-    bearish_rsi_entry = 45.0
+        # Parámetros Base de Conexión y Capital
+        self.leverage = _get_int("LEVERAGE", 5)
+        self.max_margin_per_trade_pct = _get_float("MAX_MARGIN_PER_TRADE_PCT", 0.30)
+        self.risk_fraction = _get_float("RISK_FRACTION", 0.03)
 
-    # Gestión de Salidas Avanzada ALCISTA (LONG) - Objetivos de Rango Cercano (Opción A: reducir a la mitad)
-    sl_bullish_pct = 0.0060             # Stop Loss al 0.60%
-    tp_bullish_pct = 0.0140             # Take Profit al 1.40% (mantiene R:R ≈ 2.33)
+        # Configuración de Tendencia e Indicadores Técnicos
+        self.ema_length = _get_int("EMA_LENGTH", 200)
+        self.rsi_length = _get_int("RSI_LENGTH", 14)
+        self.bb_length = _get_int("BB_LENGTH", 20)
+        self.bb_std_mult = _get_float("BB_STD_MULT", 2.0)
 
-    # Gestión de Salidas Avanzada BAJISTA (SHORT) - Objetivos de Rango Cercano (Opción A)
-    sl_bearish_pct = 0.0060             # Stop Loss al 0.60%
-    tp_bearish_pct = 0.0140             # Take Profit al 1.40%
+        # Límites Filtro de Entrada RSI
+        self.bullish_rsi_entry = _get_float("BULLISH_RSI_ENTRY", 62.0)
+        self.bearish_rsi_entry = _get_float("BEARISH_RSI_ENTRY", 45.0)
 
-    # Cortafuegos y Protección Sistémica
-    max_daily_loss_usd = 25.0           # Freno de emergencia diario incrementado proporcionalmente
-    last_pnl_check_date = None
-    regime_lookback = 10
+        # Gestión de Salidas (TP/SL) - porcentajes relativos
+        self.sl_bullish_pct = _get_float("SL_BULLISH_PCT", 0.0060)
+        self.tp_bullish_pct = _get_float("TP_BULLISH_PCT", 0.0140)
+        self.sl_bearish_pct = _get_float("SL_BEARISH_PCT", 0.0060)
+        self.tp_bearish_pct = _get_float("TP_BEARISH_PCT", 0.0140)
+
+        # Cortafuegos y Protección Sistémica
+        self.max_daily_loss_usd = _get_float("MAX_DAILY_LOSS_USD", 25.0)
+        self.last_pnl_check_date = None
+        self.regime_lookback = _get_int("REGIME_LOOKBACK", 10)
 # =====================================================================
 # CÁLCULO DE INDICADORES (prepare_indicators)
 # =====================================================================
