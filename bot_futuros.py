@@ -457,7 +457,7 @@ def _place_long_with_stop(
             symbol=symbol,
             side="BUY",
             type="LIMIT",
-            timeInForce="GTX",
+            timeInForce="GTC",
             quantity=qty,
             price=str(entry_limit_price),
         )
@@ -567,7 +567,7 @@ def _place_short_with_sl_tp(
             symbol=symbol,
             side="SELL",
             type="LIMIT",
-            timeInForce="GTX",
+            timeInForce="GTC",
             quantity=qty,
             price=str(entry_limit_price),
         )
