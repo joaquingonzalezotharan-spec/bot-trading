@@ -346,26 +346,44 @@ def set_trade_exits(client, symbol, side, entry_price, qty, tp_pct, sl_pct):
 
         # Envío y reintento de la orden de Take Profit (LIMIT)
         tp_placed = False
-        for intento in range(3):
-            try:
-                client.futures_create_order(
-                    symbol=symbol,
-                    side=exit_side,
-                    type="LIMIT",
-                    timeInForce="GTC",
-                    quantity=qty,
-                    price=str(tp_price),
-                    reduceOnly=True
-                )
-                print(f"[API] Orden de Take Profit Limit sembrada con éxito a un precio de: {tp_price}")
-                tp_placed = True
-                break
-            except Exception as e_tp:
-                print(f"[ALERTA] Intento {intento + 1} fallido para TP. Redondeando y reintentando... Error: {e_tp}")
-                tp_price = round(tp_price, 1)
+        try:
+            existing = client.futures_get_open_orders(symbol=symbol) or []
+            exists_tp = False
+            for o in existing:
+                try:
+                    if o.get("reduceOnly") and o.get("type") == "LIMIT" and o.get("side") == exit_side:
+                        # comparar precios si están presentes
+                        op = o.get("price")
+                        if op is not None and abs(float(op) - float(tp_price)) <= 0.0:
+                            exists_tp = True
+                            break
+                except Exception:
+                    continue
+            if not exists_tp:
+                for intento in range(3):
+                    try:
+                        client.futures_create_order(
+                            symbol=symbol,
+                            side=exit_side,
+                            type="LIMIT",
+                            timeInForce="GTC",
+                            quantity=qty,
+                            price=str(tp_price),
+                            reduceOnly=True
+                        )
+                        print(f"[API] Orden de Take Profit Limit sembrada con éxito a un precio de: {tp_price}")
+                        tp_placed = True
+                        break
+                    except Exception as e_tp:
+                        print(f"[ALERTA] Intento {intento + 1} fallido para TP. Redondeando y reintentando... Error: {e_tp}")
+                        tp_price = round(tp_price, 1)
+            else:
+                logger.info("[API] Se detectó TP reduceOnly existente; no se colocó duplicado.")
+        except Exception as e_check:
+            logger.warning(f"[API] Error comprobando órdenes existentes para TP: {e_check}", exc_info=True)
 
         if not tp_placed:
-            print("[CRÍTICO] No se pudo colocar el Take Profit tras 3 intentos. Revisar Binance manualmente.")
+            print("[CRÍTICO] No se pudo colocar el Take Profit tras intentos/duplicado; revisá Binance manualmente.")
 
         # Envío de la orden de Stop Loss (STOP_LIMIT) para mitigar el deslizamiento de precios
         try:
@@ -511,6 +529,39 @@ def _place_long_with_stop(
             logger.warning("[ORDEN] No se confirmó positionAmt LONG antes de SL/TP; omitiendo.")
             return
         
+        # --- Colocar TP LIMIT reduceOnly inmediatamente (maker) para asegurar salida pasiva ---
+        try:
+            tp_price_immediate = round(float(entry_price_exec * (1 + tp_pct + FEE_FRICTION)), 1)
+            tp_qty = abs(float(confirmed_pos_amt)) or abs(float(qty))
+            # Evitar duplicados: comprobar órdenes abiertas similares
+            try:
+                existing = client.futures_get_open_orders(symbol=symbol) or []
+                duplicate = False
+                for o in existing:
+                    try:
+                        if o.get("reduceOnly") and o.get("type") == "LIMIT" and o.get("side") == "SELL":
+                            op = o.get("price")
+                            if op is not None and abs(float(op) - tp_price_immediate) <= 0.0:
+                                duplicate = True
+                                break
+                    except Exception:
+                        continue
+                if not duplicate:
+                    client.futures_create_order(
+                        symbol=symbol,
+                        side="SELL",
+                        type="LIMIT",
+                        timeInForce="GTC",
+                        quantity=tp_qty,
+                        price=str(tp_price_immediate),
+                        reduceOnly=True,
+                    )
+                    logger.info(f"[API] TP LIMIT reduceOnly colocado inmediatamente (maker) a: {tp_price_immediate}")
+                else:
+                    logger.info("[API] TP inmediato ya existe, salto duplicado.")
+            except Exception as e_tp_im:
+                logger.warning(f"[API] No se pudo colocar TP inmediato: {e_tp_im}", exc_info=True)
+
         # Blindaje TP/SL (Stop Limit + TP Limit) con redondeo BTCUSDT paso 0.10.
         friction = FEE_FRICTION
         impacts = _compute_tp_sl_usdt_impact_opening(
@@ -621,6 +672,41 @@ def _place_short_with_sl_tp(
             logger.warning("[ORDEN] No se confirmó positionAmt SHORT antes de SL/TP; omitiendo.")
             return
         
+        # --- Colocar TP LIMIT reduceOnly inmediatamente (maker) para asegurar salida pasiva ---
+        try:
+            tp_price_immediate = round(float(entry_price_exec * (1 - tp_pct - FEE_FRICTION)), 1)
+            tp_qty = abs(float(confirmed_pos_amt)) or abs(float(qty))
+            # Evitar duplicados: comprobar órdenes abiertas similares
+            try:
+                existing = client.futures_get_open_orders(symbol=symbol) or []
+                duplicate = False
+                for o in existing:
+                    try:
+                        if o.get("reduceOnly") and o.get("type") == "LIMIT" and o.get("side") == "BUY":
+                            op = o.get("price")
+                            if op is not None and abs(float(op) - tp_price_immediate) <= 0.0:
+                                duplicate = True
+                                break
+                    except Exception:
+                        continue
+                if not duplicate:
+                    client.futures_create_order(
+                        symbol=symbol,
+                        side="BUY",
+                        type="LIMIT",
+                        timeInForce="GTC",
+                        quantity=tp_qty,
+                        price=str(tp_price_immediate),
+                        reduceOnly=True,
+                    )
+                    logger.info(f"[API] TP LIMIT reduceOnly colocado inmediatamente (maker) a: {tp_price_immediate}")
+                else:
+                    logger.info("[API] TP inmediato ya existe, salto duplicado.")
+            except Exception as e_tp_im:
+                logger.warning(f"[API] No se pudo colocar TP inmediato: {e_tp_im}", exc_info=True)
+        except Exception:
+            pass
+
         # Blindaje TP/SL (Stop Limit + TP Limit) con redondeo BTCUSDT paso 0.10.
         friction = FEE_FRICTION
         impacts = _compute_tp_sl_usdt_impact_opening(
