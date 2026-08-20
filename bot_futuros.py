@@ -530,37 +530,36 @@ def _place_long_with_stop(
             return
         
         # --- Colocar TP LIMIT reduceOnly inmediatamente (maker) para asegurar salida pasiva ---
+        tp_price_immediate = round(float(entry_price_exec * (1 + tp_pct + FEE_FRICTION)), 1)
+        tp_qty = abs(float(confirmed_pos_amt)) or abs(float(qty))
+        # Evitar duplicados: comprobar órdenes abiertas similares
         try:
-            tp_price_immediate = round(float(entry_price_exec * (1 + tp_pct + FEE_FRICTION)), 1)
-            tp_qty = abs(float(confirmed_pos_amt)) or abs(float(qty))
-            # Evitar duplicados: comprobar órdenes abiertas similares
-            try:
-                existing = client.futures_get_open_orders(symbol=symbol) or []
-                duplicate = False
-                for o in existing:
-                    try:
-                        if o.get("reduceOnly") and o.get("type") == "LIMIT" and o.get("side") == "SELL":
-                            op = o.get("price")
-                            if op is not None and abs(float(op) - tp_price_immediate) <= 0.0:
-                                duplicate = True
-                                break
-                    except Exception:
-                        continue
-                if not duplicate:
-                    client.futures_create_order(
-                        symbol=symbol,
-                        side="SELL",
-                        type="LIMIT",
-                        timeInForce="GTC",
-                        quantity=tp_qty,
-                        price=str(tp_price_immediate),
-                        reduceOnly=True,
-                    )
-                    logger.info(f"[API] TP LIMIT reduceOnly colocado inmediatamente (maker) a: {tp_price_immediate}")
-                else:
-                    logger.info("[API] TP inmediato ya existe, salto duplicado.")
-            except Exception as e_tp_im:
-                logger.warning(f"[API] No se pudo colocar TP inmediato: {e_tp_im}", exc_info=True)
+            existing = client.futures_get_open_orders(symbol=symbol) or []
+            duplicate = False
+            for o in existing:
+                try:
+                    if o.get("reduceOnly") and o.get("type") == "LIMIT" and o.get("side") == "SELL":
+                        op = o.get("price")
+                        if op is not None and abs(float(op) - tp_price_immediate) <= 0.0:
+                            duplicate = True
+                            break
+                except Exception:
+                    continue
+            if not duplicate:
+                client.futures_create_order(
+                    symbol=symbol,
+                    side="SELL",
+                    type="LIMIT",
+                    timeInForce="GTC",
+                    quantity=tp_qty,
+                    price=str(tp_price_immediate),
+                    reduceOnly=True,
+                )
+                logger.info(f"[API] TP LIMIT reduceOnly colocado inmediatamente (maker) a: {tp_price_immediate}")
+            else:
+                logger.info("[API] TP inmediato ya existe, salto duplicado.")
+        except Exception as e_tp_im:
+            logger.warning(f"[API] No se pudo colocar TP inmediato: {e_tp_im}", exc_info=True)
 
         # Blindaje TP/SL (Stop Limit + TP Limit) con redondeo BTCUSDT paso 0.10.
         friction = FEE_FRICTION
