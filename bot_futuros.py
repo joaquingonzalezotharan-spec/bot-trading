@@ -411,6 +411,33 @@ def set_trade_exits(client, symbol, side, entry_price, qty, tp_pct, sl_pct):
     except Exception as e_general:
         print(f"[ERROR GENERAL EN ÓRDENES DE SALIDA] No se pudo procesar la lógica de TP/SL: {e_general}")
 
+def safe_cancel_open_orders_keep_tp(client, symbol):
+    """
+    Cancela órdenes abiertas excepto TAKE PROFIT LIMIT reduceOnly (maker).
+    Esto evita que el bot borre automáticamente nuestros TP LIMIT pasivos.
+    """
+    try:
+        open_orders = client.futures_get_open_orders(symbol=symbol) or []
+    except Exception:
+        # Si no podemos listar, no intentamos cancelar nada.
+        return
+
+    for o in open_orders:
+        try:
+            # Si es TP LIMIT reduceOnly, lo preservamos.
+            if o.get("reduceOnly") and str(o.get("type", "")).upper() == "LIMIT":
+                continue
+            oid = o.get("orderId") or o.get("clientOrderId")
+            if oid is None:
+                continue
+            try:
+                client.futures_cancel_order(symbol=symbol, orderId=oid)
+            except Exception:
+                # Ignorar fallos al cancelar una orden concreta.
+                continue
+        except Exception:
+            continue
+
 def _compute_tp_sl_usdt_impact_opening(
     *,
     side: str,
@@ -915,6 +942,7 @@ def main():
     
     try:
         logger.info(f"[STARTUP] Purgando órdenes huérfanas en Binance para {args.symbol}...")
+        # En startup hacemos purga completa (aceptable).
         client.futures_cancel_all_open_orders(symbol=args.symbol)
         logger.info("[STARTUP] Purga automática completada de manera exitosa.")
     except BinanceAPIException as e:
@@ -930,7 +958,8 @@ def main():
             logger.info(
                 f"[STARTUP] Cancelando órdenes abiertas antes de marginType ISOLATED ({args.symbol})..."
             )
-            client.futures_cancel_all_open_orders(symbol=args.symbol)
+            # Antes de evaluar aperturas, cancelamos sólo órdenes que NO sean TP LIMIT reduceOnly
+            safe_cancel_open_orders_keep_tp(client, args.symbol)
 
             try:
                 client.futures_change_margin_type(
@@ -1126,6 +1155,7 @@ def main():
                 f"[FORCE_CLOSE] Cancelando órdenes abiertas antes de cierre: symbol={symbol} side={close_side} qty={quantity}"
             )
             try:
+                # Cancel dentro de fuerza de cierre: necesario para asegurar cierre limpio.
                 client.futures_cancel_all_open_orders(symbol=symbol)
             except BinanceAPIException as e_cancel_all:
                 logger.warning(f"[FORCE_CLOSE] Cancel_all_open_orders falló: {e_cancel_all}", exc_info=True)
@@ -1854,7 +1884,8 @@ def main():
                     time.sleep(scan_interval)
                     continue
 
-                client.futures_cancel_all_open_orders(symbol=args.symbol)
+                # Antes de abrir nuevas entradas: cancelar solo órdenes que no sean TP LIMIT reduceOnly
+                safe_cancel_open_orders_keep_tp(client, args.symbol)
 
                 # 5) Reglas de entrada
                 if is_lateral:
