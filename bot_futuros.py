@@ -375,6 +375,26 @@ def set_trade_exits(client, symbol, side, entry_price, qty, tp_pct, sl_pct):
                         tp_placed = True
                         break
                     except Exception as e_tp:
+                        # Si falla, comprobamos si la orden ya existe en Binance (duplication/network race).
+                        try:
+                            existing_after_err = client.futures_get_open_orders(symbol=symbol) or []
+                            found_equivalent = False
+                            for o2 in existing_after_err:
+                                try:
+                                    if o2.get("reduceOnly") and o2.get("type") == "LIMIT" and o2.get("side") == exit_side:
+                                        op = o2.get("price")
+                                        if op is not None and abs(float(op) - float(tp_price)) <= 0.0:
+                                            found_equivalent = True
+                                            break
+                                except Exception:
+                                    continue
+                            if found_equivalent:
+                                logger.info("[API] Tras error, se detectó TP existente en Binance; marcando como colocado.")
+                                tp_placed = True
+                                break
+                        except Exception:
+                            # Si listar órdenes falla, fallback al retry normal.
+                            pass
                         print(f"[ALERTA] Intento {intento + 1} fallido para TP. Redondeando y reintentando... Error: {e_tp}")
                         tp_price = round(tp_price, 1)
             else:
@@ -1510,9 +1530,19 @@ def main():
 
                             # Trigger break-even only on meaningful moves (>= 0.4%)
                             break_even_trigger_pct = 0.0040  # +0.40% a favor
-                            # Add small offset to stop loss to cover fees (~0.10%)
-                            break_even_offset = entry_price_val * 0.001
-                            stop_px = round(float(entry_price_val + break_even_offset), 1)  # tick BTCUSDT=0.10
+                            # Ajuste del Break-Even para cubrir comisiones: movemos el SL
+                            # por encima/por debajo del entry_price según la dirección.
+                            try:
+                                if position_amt > 0:
+                                    # LONG: SL = entry * (1 + FEE_FRICTION)
+                                    stop_px = round(float(entry_price_val * (1 + FEE_FRICTION)), 1)
+                                else:
+                                    # SHORT: SL = entry * (1 - FEE_FRICTION)
+                                    stop_px = round(float(entry_price_val * (1 - FEE_FRICTION)), 1)
+                            except Exception:
+                                # Fallback conservador si algo falla, mantener pequeño offset.
+                                break_even_offset = entry_price_val * 0.001
+                                stop_px = round(float(entry_price_val + break_even_offset), 1)  # tick BTCUSDT=0.10
 
                             should_move = (
                                 (position_amt > 0 and current_px >= entry_price_val * (1 + break_even_trigger_pct))
