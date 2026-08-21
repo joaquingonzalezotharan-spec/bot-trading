@@ -348,11 +348,28 @@ def set_trade_exits(client, symbol, side, entry_price, qty, tp_pct, sl_pct):
         tp_placed = False
         try:
             existing = client.futures_get_open_orders(symbol=symbol) or []
+            # Si hay TP antiguos reduceOnly que puedan causar conflicto, los cancelamos
+            # para poder sembrar el TP correcto del trade actual.
+            for o in existing:
+                try:
+                    if o.get("reduceOnly") and str(o.get("type", "")).upper() == "LIMIT" and o.get("side") == exit_side:
+                        oid = o.get("orderId") or o.get("clientOrderId")
+                        if oid is None:
+                            continue
+                        try:
+                            client.futures_cancel_order(symbol=symbol, orderId=oid)
+                            logger.info(f"[API] Cancelado TP antiguo orderId={oid} para reemplazo.")
+                        except Exception as e_cancel_old:
+                            logger.warning(f"[API] Falló cancelar TP antiguo orderId={oid}: {e_cancel_old}", exc_info=True)
+                except Exception:
+                    continue
+
+            # Refrescar la lista de órdenes después de cancelar para detectar si aún existe un TP equivalente.
+            existing = client.futures_get_open_orders(symbol=symbol) or []
             exists_tp = False
             for o in existing:
                 try:
-                    if o.get("reduceOnly") and o.get("type") == "LIMIT" and o.get("side") == exit_side:
-                        # comparar precios si están presentes
+                    if o.get("reduceOnly") and str(o.get("type", "")).upper() == "LIMIT" and o.get("side") == exit_side:
                         op = o.get("price")
                         if op is not None and abs(float(op) - float(tp_price)) <= 0.0:
                             exists_tp = True
