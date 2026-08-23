@@ -383,11 +383,10 @@ def set_trade_exits(client, symbol, side, entry_price, qty, tp_pct, sl_pct):
                             symbol=symbol,
                             side=exit_side,
                             type="LIMIT",
-                            timeInForce="GTC",
+                            timeInForce="GTX",
                             quantity=qty,
                             price=str(tp_price),
                             reduceOnly=True,
-                            postOnly=True,
                         )
                         print(f"[API] Orden de Take Profit Limit sembrada con éxito a un precio de: {tp_price}")
                         tp_placed = True
@@ -557,10 +556,9 @@ def _place_long_with_stop(
             symbol=symbol,
             side="BUY",
             type="LIMIT",
-            timeInForce="GTC",
+            timeInForce="GTX",
             quantity=qty,
             price=str(entry_limit_price),
-            postOnly=True,
         )
         order_id = entry_order.get("orderId")
 
@@ -616,11 +614,10 @@ def _place_long_with_stop(
                         symbol=symbol,
                         side="SELL",
                         type="LIMIT",
-                        timeInForce="GTC",
+                        timeInForce="GTX",
                         quantity=tp_qty,
                         price=str(tp_price_immediate),
                         reduceOnly=True,
-                        postOnly=True,
                     )
                 logger.info(f"[API] TP LIMIT reduceOnly colocado inmediatamente (maker) a: {tp_price_immediate}")
             else:
@@ -701,10 +698,9 @@ def _place_short_with_sl_tp(
             symbol=symbol,
             side="SELL",
             type="LIMIT",
-            timeInForce="GTC",
+            timeInForce="GTX",
             quantity=qty,
             price=str(entry_limit_price),
-            postOnly=True,
         )
         order_id = entry_order.get("orderId")
 
@@ -761,11 +757,10 @@ def _place_short_with_sl_tp(
                         symbol=symbol,
                         side="BUY",
                         type="LIMIT",
-                        timeInForce="GTC",
+                        timeInForce="GTX",
                         quantity=tp_qty,
                         price=str(tp_price_immediate),
                         reduceOnly=True,
-                        postOnly=True,
                     )
                     logger.info(f"[API] TP LIMIT reduceOnly colocado inmediatamente (maker) a: {tp_price_immediate}")
                 else:
