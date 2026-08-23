@@ -34,7 +34,7 @@ last_cooldown_log_ts = 0.0
 # =====================================================================
 # Pérdida máxima fija estimada en USD por operación (bajo el SL configurado).
 RISK_PER_TRADE = 7.5
-FEE_FRICTION = float(os.environ.get("FEE_FRICTION", "0.0007"))  # fricción fija usada para TP (maker+taker adjustment)
+FEE_FRICTION = float(os.environ.get("FEE_FRICTION", "0.0015"))  # fricción fija usada para TP (maker+taker adjustment)
 
 
 def calculate_qty_fixed_risk(
@@ -203,7 +203,7 @@ class StrategyConfig:
         # Parámetros Base de Conexión y Capital
         self.leverage = _get_int("LEVERAGE", 5)
         self.max_margin_per_trade_pct = _get_float("MAX_MARGIN_PER_TRADE_PCT", 0.30)
-        self.risk_fraction = _get_float("RISK_FRACTION", 0.03)
+        self.risk_fraction = _get_float("RISK_FRACTION", 0.02)
 
         # Configuración de Tendencia e Indicadores Técnicos
         self.ema_length = _get_int("EMA_LENGTH", 200)
@@ -216,9 +216,9 @@ class StrategyConfig:
         self.bearish_rsi_entry = _get_float("BEARISH_RSI_ENTRY", 45.0)
 
         # Gestión de Salidas (TP/SL) - porcentajes relativos
-        self.sl_bullish_pct = _get_float("SL_BULLISH_PCT", 0.0060)
+        self.sl_bullish_pct = _get_float("SL_BULLISH_PCT", 0.0120)
         self.tp_bullish_pct = _get_float("TP_BULLISH_PCT", 0.0140)
-        self.sl_bearish_pct = _get_float("SL_BEARISH_PCT", 0.0060)
+        self.sl_bearish_pct = _get_float("SL_BEARISH_PCT", 0.0120)
         self.tp_bearish_pct = _get_float("TP_BEARISH_PCT", 0.0140)
 
         # Cortafuegos y Protección Sistémica
@@ -386,7 +386,8 @@ def set_trade_exits(client, symbol, side, entry_price, qty, tp_pct, sl_pct):
                             timeInForce="GTC",
                             quantity=qty,
                             price=str(tp_price),
-                            reduceOnly=True
+                            reduceOnly=True,
+                            postOnly=True,
                         )
                         print(f"[API] Orden de Take Profit Limit sembrada con éxito a un precio de: {tp_price}")
                         tp_placed = True
@@ -559,6 +560,7 @@ def _place_long_with_stop(
             timeInForce="GTC",
             quantity=qty,
             price=str(entry_limit_price),
+            postOnly=True,
         )
         order_id = entry_order.get("orderId")
 
@@ -610,15 +612,16 @@ def _place_long_with_stop(
                 except Exception:
                     continue
             if not duplicate:
-                client.futures_create_order(
-                    symbol=symbol,
-                    side="SELL",
-                    type="LIMIT",
-                    timeInForce="GTC",
-                    quantity=tp_qty,
-                    price=str(tp_price_immediate),
-                    reduceOnly=True,
-                )
+                    client.futures_create_order(
+                        symbol=symbol,
+                        side="SELL",
+                        type="LIMIT",
+                        timeInForce="GTC",
+                        quantity=tp_qty,
+                        price=str(tp_price_immediate),
+                        reduceOnly=True,
+                        postOnly=True,
+                    )
                 logger.info(f"[API] TP LIMIT reduceOnly colocado inmediatamente (maker) a: {tp_price_immediate}")
             else:
                 logger.info("[API] TP inmediato ya existe, salto duplicado.")
@@ -701,6 +704,7 @@ def _place_short_with_sl_tp(
             timeInForce="GTC",
             quantity=qty,
             price=str(entry_limit_price),
+            postOnly=True,
         )
         order_id = entry_order.get("orderId")
 
@@ -761,6 +765,7 @@ def _place_short_with_sl_tp(
                         quantity=tp_qty,
                         price=str(tp_price_immediate),
                         reduceOnly=True,
+                        postOnly=True,
                     )
                     logger.info(f"[API] TP LIMIT reduceOnly colocado inmediatamente (maker) a: {tp_price_immediate}")
                 else:
