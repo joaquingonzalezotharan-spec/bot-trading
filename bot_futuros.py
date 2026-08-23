@@ -857,8 +857,6 @@ def _place_short_with_sl_tp(
                         logger.warning(f"[API] No se pudo colocar TP inmediato: {e_tp_im}", exc_info=True)
                 else:
                     logger.info("[API] TP inmediato ya existe, salto duplicado.")
-        except Exception:
-            pass
 
         # Blindaje TP/SL (Stop Limit + TP Limit) con redondeo BTCUSDT paso 0.10.
         friction = FEE_FRICTION
