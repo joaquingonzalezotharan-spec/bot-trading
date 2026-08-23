@@ -644,36 +644,39 @@ def _place_long_with_stop(
                             break
                 except Exception:
                     continue
+
             if not duplicate:
+                reduce_only = True
+                # Intento primario con GTX (Post-Only). Variables definidas antes del try.
                 try:
-                    try:
+                    client.futures_create_order(
+                        symbol=symbol,
+                        side="SELL",
+                        type="LIMIT",
+                        timeInForce="GTX",
+                        quantity=tp_qty,
+                        price=str(tp_price_immediate),
+                        reduceOnly=reduce_only,
+                    )
+                except BinanceAPIException as e_gtx_tp:
+                    code = getattr(e_gtx_tp, "code", None)
+                    if code == -5022 or "would immediately trigger" in str(e_gtx_tp) or "Post Only" in str(e_gtx_tp):
+                        logger.warning("[API] GTX rechazado para TP inmediato LONG. Aplicando fallback a GTC...")
                         client.futures_create_order(
                             symbol=symbol,
                             side="SELL",
                             type="LIMIT",
-                            timeInForce="GTX",
+                            timeInForce="GTC",
                             quantity=tp_qty,
                             price=str(tp_price_immediate),
-                            reduceOnly=True,
+                            reduceOnly=reduce_only,
                         )
-                    except BinanceAPIException as e_gtx_tp:
-                        code = getattr(e_gtx_tp, "code", None)
-                        if code == -5022 or "would immediately trigger" in str(e_gtx_tp) or "Post Only" in str(e_gtx_tp):
-                            logger.warning("[API] GTX rechazado para TP inmediato LONG. Aplicando fallback a GTC...")
-                            client.futures_create_order(
-                                symbol=symbol,
-                                side="SELL",
-                                type="LIMIT",
-                                timeInForce="GTC",
-                                quantity=tp_qty,
-                                price=str(tp_price_immediate),
-                                reduceOnly=True,
-                            )
-                        else:
-                            raise
-                    logger.info(f"[API] TP LIMIT reduceOnly colocado inmediatamente (maker) a: {tp_price_immediate}")
+                    else:
+                        raise
                 except Exception as e_tp_im:
                     logger.warning(f"[API] No se pudo colocar TP inmediato: {e_tp_im}", exc_info=True)
+                else:
+                    logger.info(f"[API] TP LIMIT reduceOnly colocado inmediatamente (maker) a: {tp_price_immediate}")
             else:
                 logger.info("[API] TP inmediato ya existe, salto duplicado.")
         except Exception as e_tp_im:
@@ -809,54 +812,57 @@ def _place_short_with_sl_tp(
             return
         
         # --- Colocar TP LIMIT reduceOnly inmediatamente (maker) para asegurar salida pasiva ---
+        tp_price_immediate = round(float(entry_price_exec * (1 - tp_pct - FEE_FRICTION)), 1)
+        tp_qty = abs(float(confirmed_pos_amt)) or abs(float(qty))
+        # Evitar duplicados: comprobar órdenes abiertas similares
         try:
-            tp_price_immediate = round(float(entry_price_exec * (1 - tp_pct - FEE_FRICTION)), 1)
-            tp_qty = abs(float(confirmed_pos_amt)) or abs(float(qty))
-            # Evitar duplicados: comprobar órdenes abiertas similares
-            try:
-                existing = client.futures_get_open_orders(symbol=symbol) or []
-                duplicate = False
-                for o in existing:
-                    try:
-                        if o.get("reduceOnly") and o.get("type") == "LIMIT" and o.get("side") == "BUY":
-                            op = o.get("price")
-                            if op is not None and abs(float(op) - tp_price_immediate) <= 0.0:
-                                duplicate = True
-                                break
-                    except Exception:
-                        continue
-                if not duplicate:
-                    try:
-                        try:
-                            client.futures_create_order(
-                                symbol=symbol,
-                                side="BUY",
-                                type="LIMIT",
-                                timeInForce="GTX",
-                                quantity=tp_qty,
-                                price=str(tp_price_immediate),
-                                reduceOnly=True,
-                            )
-                        except BinanceAPIException as e_gtx_tp:
-                            code = getattr(e_gtx_tp, "code", None)
-                            if code == -5022 or "would immediately trigger" in str(e_gtx_tp) or "Post Only" in str(e_gtx_tp):
-                                logger.warning("[API] GTX rechazado para TP inmediato SHORT. Aplicando fallback a GTC...")
-                                client.futures_create_order(
-                                    symbol=symbol,
-                                    side="BUY",
-                                    type="LIMIT",
-                                    timeInForce="GTC",
-                                    quantity=tp_qty,
-                                    price=str(tp_price_immediate),
-                                    reduceOnly=True,
-                                )
-                            else:
-                                raise
-                        logger.info(f"[API] TP LIMIT reduceOnly colocado inmediatamente (maker) a: {tp_price_immediate}")
-                    except Exception as e_tp_im:
-                        logger.warning(f"[API] No se pudo colocar TP inmediato: {e_tp_im}", exc_info=True)
+            existing = client.futures_get_open_orders(symbol=symbol) or []
+            duplicate = False
+            for o in existing:
+                try:
+                    if o.get("reduceOnly") and o.get("type") == "LIMIT" and o.get("side") == "BUY":
+                        op = o.get("price")
+                        if op is not None and abs(float(op) - tp_price_immediate) <= 0.0:
+                            duplicate = True
+                            break
+                except Exception:
+                    continue
+
+            if not duplicate:
+                reduce_only = True
+                try:
+                    client.futures_create_order(
+                        symbol=symbol,
+                        side="BUY",
+                        type="LIMIT",
+                        timeInForce="GTX",
+                        quantity=tp_qty,
+                        price=str(tp_price_immediate),
+                        reduceOnly=reduce_only,
+                    )
+                except BinanceAPIException as e_gtx_tp:
+                    code = getattr(e_gtx_tp, "code", None)
+                    if code == -5022 or "would immediately trigger" in str(e_gtx_tp) or "Post Only" in str(e_gtx_tp):
+                        logger.warning("[API] GTX rechazado para TP inmediato SHORT. Aplicando fallback a GTC...")
+                        client.futures_create_order(
+                            symbol=symbol,
+                            side="BUY",
+                            type="LIMIT",
+                            timeInForce="GTC",
+                            quantity=tp_qty,
+                            price=str(tp_price_immediate),
+                            reduceOnly=reduce_only,
+                        )
+                    else:
+                        raise
+                except Exception as e_tp_im:
+                    logger.warning(f"[API] No se pudo colocar TP inmediato: {e_tp_im}", exc_info=True)
                 else:
-                    logger.info("[API] TP inmediato ya existe, salto duplicado.")
+                    logger.info(f"[API] TP LIMIT reduceOnly colocado inmediatamente (maker) a: {tp_price_immediate}")
+            else:
+                logger.info("[API] TP inmediato ya existe, salto duplicado.")
+        except Exception as e_tp_im:
+            logger.warning(f"[API] No se pudo colocar TP inmediato: {e_tp_im}", exc_info=True)
 
         # Blindaje TP/SL (Stop Limit + TP Limit) con redondeo BTCUSDT paso 0.10.
         friction = FEE_FRICTION
